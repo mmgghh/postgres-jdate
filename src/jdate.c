@@ -385,3 +385,37 @@ jdate_trunc(PG_FUNCTION_ARGS)
 	jdn = jalaali_to_jdn(jd.jy, jd.jm, jd.jd);
 	PG_RETURN_DATEADT((DateADT) (jdn - POSTGRES_EPOCH_JDATE));
 }
+
+/* ---------------------------------------------------------------------
+ * Bridge formatting: Jalali date + (calendar-agnostic) local clock time
+ * for a timestamptz, respecting the session's TimeZone -- unlike the
+ * hardcoded Asia/Tehran of the extension this supersedes.
+ * ------------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(jdate_format_timestamptz);
+Datum
+jdate_format_timestamptz(PG_FUNCTION_ARGS)
+{
+	TimestampTz ts = PG_GETARG_TIMESTAMPTZ(0);
+	bool		with_time = PG_GETARG_BOOL(1);
+	Datum		local_ts;
+	DateADT		day;
+	JalaaliDate jd;
+	char	   *result;
+
+	local_ts = DirectFunctionCall1(timestamptz_timestamp, TimestampTzGetDatum(ts));
+	day = DatumGetDateADT(DirectFunctionCall1(timestamp_date, local_ts));
+	jd = jdate_to_jalaali(day);
+
+	if (with_time)
+	{
+		char	   *time_str = DatumGetCString(DirectFunctionCall1(time_out,
+														  DirectFunctionCall1(timestamp_time, local_ts)));
+
+		result = psprintf("%04d-%02d-%02d %s", jd.jy, jd.jm, jd.jd, time_str);
+	}
+	else
+		result = psprintf("%04d-%02d-%02d", jd.jy, jd.jm, jd.jd);
+
+	PG_RETURN_TEXT_P(cstring_to_text(result));
+}

@@ -209,3 +209,10 @@ CREATE FUNCTION pg_catalog.extract(text, jdate) RETURNS numeric
 
 CREATE FUNCTION jdate_trunc(text, jdate) RETURNS jdate
     AS 'MODULE_PATHNAME', 'jdate_trunc' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- ============================================================
+-- Timestamptz formatting bridge (until a native jtimestamptz type ships)
+-- ============================================================
+
+CREATE FUNCTION jdate_format(timestamptz, with_time boolean DEFAULT true) RETURNS text
+    AS 'MODULE_PATHNAME', 'jdate_format_timestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;

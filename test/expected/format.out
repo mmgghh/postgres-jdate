@@ -1,0 +1,21 @@
+SET timezone = 'Asia/Tehran';
+SELECT jdate_format(timestamptz '2024-03-20 00:30:00+03:30') AS tehran_local;
+    tehran_local     
+---------------------
+ 1403-01-01 00:30:00
+(1 row)
+
+SELECT jdate_format(timestamptz '2024-03-20 00:30:00+03:30', false) AS tehran_date_only;
+ tehran_date_only 
+------------------
+ 1403-01-01
+(1 row)
+
+SET timezone = 'UTC';
+SELECT jdate_format(timestamptz '2024-03-20 00:30:00+03:30') AS utc_crosses_to_prior_day;
+ utc_crosses_to_prior_day 
+--------------------------
+ 1402-12-29 21:00:00
+(1 row)
+
+RESET timezone;
