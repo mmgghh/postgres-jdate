@@ -188,3 +188,24 @@ CREATE FUNCTION jdate(timestamptz) RETURNS jdate
     AS 'MODULE_PATHNAME', 'timestamptz_jdate'
     LANGUAGE C STABLE STRICT PARALLEL SAFE;
 CREATE CAST (timestamptz AS jdate) WITH FUNCTION jdate(timestamptz) AS ASSIGNMENT;
+
+-- ============================================================
+-- Field access: jdate_part / extract() / jdate_trunc
+-- ============================================================
+
+CREATE FUNCTION jdate_part(text, jdate) RETURNS float8
+    AS 'MODULE_PATHNAME', 'jdate_part' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- EXTRACT(field FROM source) desugars to a *schema-qualified* call to
+-- pg_catalog.extract(text, sourcetype) -- confirmed by testing: an
+-- unqualified extract(text, jdate) in this extension's own schema is
+-- never considered, regardless of search_path. It must be registered
+-- directly in pg_catalog to participate in EXTRACT(... FROM jdate_val)
+-- syntax. This requires the extension to be installed by a superuser
+-- (or a role with equivalent privileges) -- already true for any
+-- C-language extension, since placing its files requires that access.
+CREATE FUNCTION pg_catalog.extract(text, jdate) RETURNS numeric
+    AS 'MODULE_PATHNAME', 'jdate_extract' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION jdate_trunc(text, jdate) RETURNS jdate
+    AS 'MODULE_PATHNAME', 'jdate_trunc' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;

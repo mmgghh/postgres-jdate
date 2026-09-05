@@ -1,0 +1,161 @@
+-- jdate_part
+SELECT jdate_part('year', '1403-05-15'::jdate) AS f_year;
+ f_year 
+--------
+   1403
+(1 row)
+
+SELECT jdate_part('month', '1403-05-15'::jdate) AS f_month;
+ f_month 
+---------
+       5
+(1 row)
+
+SELECT jdate_part('day', '1403-05-15'::jdate) AS f_day;
+ f_day 
+-------
+    15
+(1 row)
+
+SELECT jdate_part('quarter', '1403-05-15'::jdate) AS f_quarter;
+ f_quarter 
+-----------
+         2
+(1 row)
+
+SELECT jdate_part('quarter', '1403-11-01'::jdate) AS f_quarter_q4;
+ f_quarter_q4 
+--------------
+            4
+(1 row)
+
+SELECT jdate_part('doy', '1403-01-01'::jdate) AS f_doy_new_year;
+ f_doy_new_year 
+----------------
+              1
+(1 row)
+
+SELECT jdate_part('doy', '1403-07-01'::jdate) AS f_doy_second_half;
+ f_doy_second_half 
+-------------------
+               187
+(1 row)
+
+SELECT jdate_part('decade', '1403-05-15'::jdate) AS f_decade;
+ f_decade 
+----------
+     1400
+(1 row)
+
+SELECT jdate_part('century', '1403-05-15'::jdate) AS f_century;
+ f_century 
+-----------
+        15
+(1 row)
+
+SELECT jdate_part('hour', '1403-05-15'::jdate) AS f_hour_zero;
+ f_hour_zero 
+-------------
+           0
+(1 row)
+
+SELECT jdate_part('minute', '1403-05-15'::jdate) AS f_minute_zero;
+ f_minute_zero 
+---------------
+             0
+(1 row)
+
+SELECT jdate_part('second', '1403-05-15'::jdate) AS f_second_zero;
+ f_second_zero 
+---------------
+             0
+(1 row)
+
+-- dow/isodow are calendar-agnostic: must match the Gregorian answer for
+-- the identical underlying day
+SELECT jdate_part('dow', '1403-05-15'::jdate) = date_part('dow', '1403-05-15'::jdate::date) AS dow_matches_gregorian;
+ dow_matches_gregorian 
+-----------------------
+ t
+(1 row)
+
+SELECT jdate_part('isodow', '1403-05-15'::jdate) = date_part('isodow', '1403-05-15'::jdate::date) AS isodow_matches_gregorian;
+ isodow_matches_gregorian 
+--------------------------
+ t
+(1 row)
+
+-- unsupported unit
+SELECT jdate_part('week', '1403-05-15'::jdate);
+ERROR:  unit not supported for jdate_part/extract
+-- EXTRACT() overload, registered directly in pg_catalog
+SELECT EXTRACT(year FROM '1403-05-15'::jdate) AS extract_year;
+ extract_year 
+--------------
+         1403
+(1 row)
+
+SELECT EXTRACT(month FROM '1403-05-15'::jdate) AS extract_month;
+ extract_month 
+---------------
+             5
+(1 row)
+
+SELECT pg_typeof(EXTRACT(year FROM '1403-05-15'::jdate)) AS extract_returns_numeric;
+ extract_returns_numeric 
+-------------------------
+ numeric
+(1 row)
+
+-- confirm EXTRACT for pre-existing types is completely unaffected
+SELECT EXTRACT(year FROM date '2024-01-01') AS extract_year_date_unaffected;
+ extract_year_date_unaffected 
+------------------------------
+                         2024
+(1 row)
+
+SELECT EXTRACT(year FROM timestamp '2024-01-01 00:00:00') AS extract_year_timestamp_unaffected;
+ extract_year_timestamp_unaffected 
+-----------------------------------
+                              2024
+(1 row)
+
+-- jdate_trunc
+SELECT jdate_trunc('day', '1403-05-15'::jdate) AS trunc_day;
+ trunc_day  
+------------
+ 1403-05-15
+(1 row)
+
+SELECT jdate_trunc('month', '1403-05-15'::jdate) AS trunc_month;
+ trunc_month 
+-------------
+ 1403-05-01
+(1 row)
+
+SELECT jdate_trunc('quarter', '1403-05-15'::jdate) AS trunc_quarter;
+ trunc_quarter 
+---------------
+ 1403-04-01
+(1 row)
+
+SELECT jdate_trunc('quarter', '1403-11-20'::jdate) AS trunc_quarter_q4;
+ trunc_quarter_q4 
+------------------
+ 1403-10-01
+(1 row)
+
+SELECT jdate_trunc('year', '1403-05-15'::jdate) AS trunc_year;
+ trunc_year 
+------------
+ 1403-01-01
+(1 row)
+
+SELECT jdate_trunc('year', '-infinity'::jdate) AS trunc_year_infinite;
+ trunc_year_infinite 
+---------------------
+ -infinity
+(1 row)
+
+SELECT jdate_trunc('week', '1403-05-15'::jdate);  -- unsupported unit
+ERROR:  unit not supported for jdate_trunc

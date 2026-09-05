@@ -248,3 +248,140 @@ timestamptz_jdate(PG_FUNCTION_ARGS)
 {
 	return DirectFunctionCall1(timestamptz_date, PG_GETARG_DATUM(0));
 }
+
+/* ---------------------------------------------------------------------
+ * jdate_part / extract / jdate_trunc
+ * ------------------------------------------------------------------- */
+
+static int
+jdate_decode_field(text *units)
+{
+	char	   *lowunits;
+	int			type,
+				val;
+
+	lowunits = downcase_truncate_identifier(VARDATA_ANY(units),
+											 VARSIZE_ANY_EXHDR(units),
+											 false);
+	type = DecodeUnits(0, lowunits, &val);
+	if (type == UNKNOWN_FIELD)
+		type = DecodeSpecial(0, lowunits, &val);
+	if (type != UNITS)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unit \"%s\" not recognized for type jdate", lowunits)));
+	return val;
+}
+
+static double
+jdate_get_field(DateADT value, int val)
+{
+	JalaaliDate jd = jdate_to_jalaali(value);
+
+	switch (val)
+	{
+		case DTK_YEAR:
+			return jd.jy;
+		case DTK_MONTH:
+			return jd.jm;
+		case DTK_DAY:
+			return jd.jd;
+		case DTK_QUARTER:
+			return (jd.jm - 1) / 3 + 1;
+		case DTK_DOY:
+			return (jd.jm <= 6)
+				? (jd.jm - 1) * 31 + jd.jd
+				: 186 + (jd.jm - 7) * 30 + jd.jd;
+		case DTK_DECADE:
+			return (jd.jy >= 0)
+				? (jd.jy / 10) * 10
+				: -(((-jd.jy) + 9) / 10) * 10;
+		case DTK_CENTURY:
+			return (jd.jy >= 1)
+				? (jd.jy + 99) / 100
+				: -(((-jd.jy) + 100) / 100);
+		case DTK_HOUR:
+		case DTK_MINUTE:
+		case DTK_SECOND:
+		case DTK_MILLISEC:
+		case DTK_MICROSEC:
+			return 0;
+		case DTK_DOW:
+		case DTK_ISODOW:
+			/* Day-of-week doesn't depend on which calendar you read the
+			 * date through, so reuse core's own (Gregorian-side) answer
+			 * for the identical underlying day. */
+			return DatumGetFloat8(DirectFunctionCall1(numeric_float8,
+													   DirectFunctionCall2(extract_date,
+																			PointerGetDatum(cstring_to_text(val == DTK_DOW ? "dow" : "isodow")),
+																			DateADTGetDatum(value))));
+		default:
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("unit not supported for jdate_part/extract")));
+			return 0;			/* keep compiler quiet */
+	}
+}
+
+PG_FUNCTION_INFO_V1(jdate_part);
+Datum
+jdate_part(PG_FUNCTION_ARGS)
+{
+	text	   *units = PG_GETARG_TEXT_PP(0);
+	DateADT		value = PG_GETARG_DATEADT(1);
+	int			val = jdate_decode_field(units);
+
+	PG_RETURN_FLOAT8(jdate_get_field(value, val));
+}
+
+PG_FUNCTION_INFO_V1(jdate_extract);
+Datum
+jdate_extract(PG_FUNCTION_ARGS)
+{
+	text	   *units = PG_GETARG_TEXT_PP(0);
+	DateADT		value = PG_GETARG_DATEADT(1);
+	int			val = jdate_decode_field(units);
+	double		result = jdate_get_field(value, val);
+
+	return DirectFunctionCall1(float8_numeric, Float8GetDatum(result));
+}
+
+PG_FUNCTION_INFO_V1(jdate_trunc);
+Datum
+jdate_trunc(PG_FUNCTION_ARGS)
+{
+	text	   *units = PG_GETARG_TEXT_PP(0);
+	DateADT		value = PG_GETARG_DATEADT(1);
+	int			val = jdate_decode_field(units);
+	JalaaliDate jd;
+	int			jdn;
+
+	if (DATE_NOT_FINITE(value))
+		PG_RETURN_DATEADT(value);
+
+	jd = jdate_to_jalaali(value);
+
+	switch (val)
+	{
+		case DTK_YEAR:
+			jd.jm = 1;
+			jd.jd = 1;
+			break;
+		case DTK_QUARTER:
+			jd.jm = ((jd.jm - 1) / 3) * 3 + 1;
+			jd.jd = 1;
+			break;
+		case DTK_MONTH:
+			jd.jd = 1;
+			break;
+		case DTK_DAY:
+			break;
+		default:
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("unit not supported for jdate_trunc")));
+	}
+
+	jdn = jalaali_to_jdn(jd.jy, jd.jm, jd.jd);
+	PG_RETURN_DATEADT((DateADT) (jdn - POSTGRES_EPOCH_JDATE));
+}
