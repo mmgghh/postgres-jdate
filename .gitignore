@@ -1,0 +1,14 @@
+# Local reference material, not part of the project
+ignore_me/
+
+# PGXS build artifacts
+*.o
+*.bc
+*.so
+*.dylib
+*.dll
+/results/
+/tmp_check/
+regression.diffs
+regression.out
+log/
