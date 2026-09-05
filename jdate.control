@@ -1,0 +1,4 @@
+comment = 'Jalali (Persian) calendar date type'
+default_version = '1.0'
+module_pathname = '$libdir/jdate'
+relocatable = true
