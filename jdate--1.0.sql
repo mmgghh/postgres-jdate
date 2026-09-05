@@ -136,3 +136,25 @@ CREATE AGGREGATE min(jdate) (
 CREATE AGGREGATE max(jdate) (
     SFUNC = jdate_larger, STYPE = jdate, SORTOP = >, PARALLEL = SAFE
 );
+
+-- ============================================================
+-- Arithmetic
+-- ============================================================
+
+CREATE FUNCTION jdate_pli(jdate, int4) RETURNS jdate
+    AS 'MODULE_PATHNAME', 'jdate_pli' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_mii(jdate, int4) RETURNS jdate
+    AS 'MODULE_PATHNAME', 'jdate_mii' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_mi(jdate, jdate) RETURNS int4
+    AS 'MODULE_PATHNAME', 'jdate_mi' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR + (
+    LEFTARG = jdate, RIGHTARG = int4, PROCEDURE = jdate_pli,
+    COMMUTATOR = +
+);
+CREATE OPERATOR - (
+    LEFTARG = jdate, RIGHTARG = int4, PROCEDURE = jdate_mii
+);
+CREATE OPERATOR - (
+    LEFTARG = jdate, RIGHTARG = jdate, PROCEDURE = jdate_mi
+);

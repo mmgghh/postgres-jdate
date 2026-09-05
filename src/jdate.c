@@ -189,3 +189,28 @@ jdate_larger(PG_FUNCTION_ARGS)
 {
 	return DirectFunctionCall2(date_larger, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
 }
+
+/* ---------------------------------------------------------------------
+ * Arithmetic
+ * ------------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(jdate_pli);
+Datum
+jdate_pli(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(date_pli, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}
+
+PG_FUNCTION_INFO_V1(jdate_mii);
+Datum
+jdate_mii(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(date_mii, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}
+
+PG_FUNCTION_INFO_V1(jdate_mi);
+Datum
+jdate_mi(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(date_mi, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}
