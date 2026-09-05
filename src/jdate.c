@@ -214,3 +214,37 @@ jdate_mi(PG_FUNCTION_ARGS)
 {
 	return DirectFunctionCall2(date_mi, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
 }
+
+/* ---------------------------------------------------------------------
+ * Casts to/from timestamp and timestamptz -- delegate to core's own
+ * date<->timestamp[tz] conversions, since jdate's stored value already
+ * *is* a valid DateADT for the same calendar day.
+ * ------------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(jdate_timestamp);
+Datum
+jdate_timestamp(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall1(date_timestamp, PG_GETARG_DATUM(0));
+}
+
+PG_FUNCTION_INFO_V1(jdate_timestamptz);
+Datum
+jdate_timestamptz(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall1(date_timestamptz, PG_GETARG_DATUM(0));
+}
+
+PG_FUNCTION_INFO_V1(timestamp_jdate);
+Datum
+timestamp_jdate(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall1(timestamp_date, PG_GETARG_DATUM(0));
+}
+
+PG_FUNCTION_INFO_V1(timestamptz_jdate);
+Datum
+timestamptz_jdate(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall1(timestamptz_date, PG_GETARG_DATUM(0));
+}

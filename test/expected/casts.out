@@ -1,0 +1,56 @@
+-- pin output style so this file's expected output is independent of the
+-- server's configured defaults
+SET DateStyle = 'ISO, YMD';
+SET timezone = 'UTC';
+-- jdate <-> date: binary-identical, same underlying day
+SELECT '1403-01-01'::jdate::date AS jdate_to_date;
+ jdate_to_date 
+---------------
+ 2024-03-20
+(1 row)
+
+SELECT '2024-03-20'::date::jdate AS date_to_jdate;
+ date_to_jdate 
+---------------
+ 1403-01-01
+(1 row)
+
+SELECT ('1403-01-01'::jdate::date) = '2024-03-20'::date AS same_day;
+ same_day 
+----------
+ t
+(1 row)
+
+-- jdate -> timestamp / timestamptz (assignment-level, not implicit)
+SELECT '1403-01-01'::jdate::timestamp;
+      timestamp      
+---------------------
+ 2024-03-20 00:00:00
+(1 row)
+
+SELECT '1403-01-01'::jdate::timestamptz;
+      timestamptz       
+------------------------
+ 2024-03-20 00:00:00+00
+(1 row)
+
+-- timestamp / timestamptz -> jdate (assignment-level)
+SELECT timestamp '2024-03-20 15:30:00'::jdate;
+   jdate    
+------------
+ 1403-01-01
+(1 row)
+
+SELECT timestamptz '2024-03-20 15:30:00+00'::jdate;
+   jdate    
+------------
+ 1403-01-01
+(1 row)
+
+-- neither direction is implicit: plain comparisons across types must fail
+-- rather than silently converting through a different calendar
+SELECT '1403-01-01'::jdate = date '2024-03-20';
+ERROR:  operator does not exist: jdate = date
+LINE 1: SELECT '1403-01-01'::jdate = date '2024-03-20';
+                                   ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.

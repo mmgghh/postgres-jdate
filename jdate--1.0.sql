@@ -158,3 +158,33 @@ CREATE OPERATOR - (
 CREATE OPERATOR - (
     LEFTARG = jdate, RIGHTARG = jdate, PROCEDURE = jdate_mi
 );
+
+-- ============================================================
+-- Casts to/from timestamp and timestamptz
+-- ============================================================
+
+-- ASSIGNMENT, not IMPLICIT: an implicit jdate->timestamptz cast let the
+-- planner silently satisfy min(jdate)/max(jdate) via core's timestamptz
+-- aggregate (through the cast) instead of using jdate's own min/max
+-- above -- surfaced by testing, not by inspection. Keeping these
+-- assignment-only (like jdate<->date) avoids that whole class of silent
+-- cross-type resolution.
+CREATE FUNCTION "timestamp"(jdate) RETURNS timestamp
+    AS 'MODULE_PATHNAME', 'jdate_timestamp'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE CAST (jdate AS timestamp) WITH FUNCTION "timestamp"(jdate) AS ASSIGNMENT;
+
+CREATE FUNCTION "timestamptz"(jdate) RETURNS timestamptz
+    AS 'MODULE_PATHNAME', 'jdate_timestamptz'
+    LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE CAST (jdate AS timestamptz) WITH FUNCTION "timestamptz"(jdate) AS ASSIGNMENT;
+
+CREATE FUNCTION jdate(timestamp) RETURNS jdate
+    AS 'MODULE_PATHNAME', 'timestamp_jdate'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE CAST (timestamp AS jdate) WITH FUNCTION jdate(timestamp) AS ASSIGNMENT;
+
+CREATE FUNCTION jdate(timestamptz) RETURNS jdate
+    AS 'MODULE_PATHNAME', 'timestamptz_jdate'
+    LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE CAST (timestamptz AS jdate) WITH FUNCTION jdate(timestamptz) AS ASSIGNMENT;
