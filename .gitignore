@@ -12,3 +12,9 @@ ignore_me/
 regression.diffs
 regression.out
 log/
+/test/results/
+/test/regression.diffs
+/test/regression.out
+
+# dev/test-cluster.sh's local, root-free PostgreSQL instance
+/.dev/
