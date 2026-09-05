@@ -1,0 +1,95 @@
+CREATE EXTENSION jdate;
+-- valid round trips
+SELECT '1403-01-01'::jdate;
+   jdate    
+------------
+ 1403-01-01
+(1 row)
+
+SELECT '1402-12-29'::jdate;   -- last day of a common (29-day Esfand) year
+   jdate    
+------------
+ 1402-12-29
+(1 row)
+
+SELECT '1395-12-30'::jdate;   -- last day of a leap (30-day Esfand) year
+   jdate    
+------------
+ 1395-12-30
+(1 row)
+
+SELECT '0001-01-01'::jdate;
+   jdate    
+------------
+ 0001-01-01
+(1 row)
+
+SELECT '-0061-01-01'::jdate;  -- JALAALI_MIN_YEAR
+    jdate    
+-------------
+ -0061-01-01
+(1 row)
+
+SELECT '3177-12-29'::jdate;   -- JALAALI_MAX_YEAR, common year, 29-day Esfand
+   jdate    
+------------
+ 3177-12-29
+(1 row)
+
+-- infinity
+SELECT 'infinity'::jdate, '-infinity'::jdate;
+  jdate   |   jdate   
+----------+-----------
+ infinity | -infinity
+(1 row)
+
+SELECT 'INFINITY'::jdate, 'Infinity'::jdate;
+  jdate   |  jdate   
+----------+----------
+ infinity | infinity
+(1 row)
+
+-- invalid input: format errors
+SELECT 'garbage'::jdate;
+ERROR:  invalid input syntax for type jdate: "garbage"
+LINE 1: SELECT 'garbage'::jdate;
+               ^
+SELECT '1403/01/01'::jdate;
+ERROR:  invalid input syntax for type jdate: "1403/01/01"
+LINE 1: SELECT '1403/01/01'::jdate;
+               ^
+SELECT '1403-01-01 '::jdate;
+   jdate    
+------------
+ 1403-01-01
+(1 row)
+
+SELECT '1403-01-01extra'::jdate;
+ERROR:  invalid input syntax for type jdate: "1403-01-01extra"
+LINE 1: SELECT '1403-01-01extra'::jdate;
+               ^
+-- invalid input: out-of-range values
+SELECT '1402-13-01'::jdate;    -- bad month
+ERROR:  date out of range for type jdate: "1402-13-01"
+LINE 1: SELECT '1402-13-01'::jdate;
+               ^
+SELECT '1402-00-01'::jdate;    -- bad month
+ERROR:  date out of range for type jdate: "1402-00-01"
+LINE 1: SELECT '1402-00-01'::jdate;
+               ^
+SELECT '1402-01-32'::jdate;    -- bad day
+ERROR:  date out of range for type jdate: "1402-01-32"
+LINE 1: SELECT '1402-01-32'::jdate;
+               ^
+SELECT '1394-12-30'::jdate;    -- 1394 is common: no day 30 in Esfand
+ERROR:  date out of range for type jdate: "1394-12-30"
+LINE 1: SELECT '1394-12-30'::jdate;
+               ^
+SELECT '-0062-01-01'::jdate;   -- one below JALAALI_MIN_YEAR
+ERROR:  date out of range for type jdate: "-0062-01-01"
+LINE 1: SELECT '-0062-01-01'::jdate;
+               ^
+SELECT '3178-01-01'::jdate;    -- one above JALAALI_MAX_YEAR
+ERROR:  date out of range for type jdate: "3178-01-01"
+LINE 1: SELECT '3178-01-01'::jdate;
+               ^
