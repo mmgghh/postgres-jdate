@@ -114,3 +114,78 @@ jdate_send(PG_FUNCTION_ARGS)
 	pq_sendint32(&buf, value);
 	PG_RETURN_BYTEA_P(pq_endtypsend(&buf));
 }
+
+/* ---------------------------------------------------------------------
+ * Comparison -- thin wrappers around Postgres's own date_* functions,
+ * valid because jdate shares date's exact int32 (JDN-offset) representation.
+ * ------------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(jdate_eq);
+Datum
+jdate_eq(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(date_eq, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}
+
+PG_FUNCTION_INFO_V1(jdate_ne);
+Datum
+jdate_ne(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(date_ne, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}
+
+PG_FUNCTION_INFO_V1(jdate_lt);
+Datum
+jdate_lt(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(date_lt, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}
+
+PG_FUNCTION_INFO_V1(jdate_le);
+Datum
+jdate_le(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(date_le, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}
+
+PG_FUNCTION_INFO_V1(jdate_gt);
+Datum
+jdate_gt(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(date_gt, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}
+
+PG_FUNCTION_INFO_V1(jdate_ge);
+Datum
+jdate_ge(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(date_ge, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}
+
+PG_FUNCTION_INFO_V1(jdate_cmp);
+Datum
+jdate_cmp(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(date_cmp, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}
+
+PG_FUNCTION_INFO_V1(jdate_hash);
+Datum
+jdate_hash(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall1(hashint4, PG_GETARG_DATUM(0));
+}
+
+PG_FUNCTION_INFO_V1(jdate_smaller);
+Datum
+jdate_smaller(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(date_smaller, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}
+
+PG_FUNCTION_INFO_V1(jdate_larger);
+Datum
+jdate_larger(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(date_larger, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}

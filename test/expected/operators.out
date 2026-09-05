@@ -1,0 +1,104 @@
+-- comparisons
+SELECT '1402-01-01'::jdate = '1402-01-01'::jdate AS eq_true;
+ eq_true 
+---------
+ t
+(1 row)
+
+SELECT '1402-01-01'::jdate = '1403-01-01'::jdate AS eq_false;
+ eq_false 
+----------
+ f
+(1 row)
+
+SELECT '1402-01-01'::jdate <> '1403-01-01'::jdate AS ne_true;
+ ne_true 
+---------
+ t
+(1 row)
+
+SELECT '1402-01-01'::jdate < '1403-01-01'::jdate AS lt_true;
+ lt_true 
+---------
+ t
+(1 row)
+
+SELECT '1403-01-01'::jdate < '1402-01-01'::jdate AS lt_false;
+ lt_false 
+----------
+ f
+(1 row)
+
+SELECT '1402-01-01'::jdate <= '1402-01-01'::jdate AS le_true;
+ le_true 
+---------
+ t
+(1 row)
+
+SELECT '1403-01-01'::jdate > '1402-01-01'::jdate AS gt_true;
+ gt_true 
+---------
+ t
+(1 row)
+
+SELECT '1403-01-01'::jdate >= '1403-01-01'::jdate AS ge_true;
+ ge_true 
+---------
+ t
+(1 row)
+
+-- sorting
+CREATE TABLE op_dates (d jdate);
+INSERT INTO op_dates VALUES ('1403-05-01'), ('1401-01-01'), ('1403-01-01'), ('1402-12-29');
+SELECT d FROM op_dates ORDER BY d;
+     d      
+------------
+ 1401-01-01
+ 1402-12-29
+ 1403-01-01
+ 1403-05-01
+(4 rows)
+
+-- indexing: btree opclass usable for equality and range lookups
+CREATE INDEX op_dates_idx ON op_dates (d);
+SET enable_seqscan = off;
+EXPLAIN (COSTS off) SELECT * FROM op_dates WHERE d = '1403-01-01'::jdate;
+                   QUERY PLAN                   
+------------------------------------------------
+ Index Only Scan using op_dates_idx on op_dates
+   Index Cond: (d = '1403-01-01'::jdate)
+(2 rows)
+
+EXPLAIN (COSTS off) SELECT * FROM op_dates WHERE d > '1402-01-01'::jdate ORDER BY d;
+                   QUERY PLAN                   
+------------------------------------------------
+ Index Only Scan using op_dates_idx on op_dates
+   Index Cond: (d > '1402-01-01'::jdate)
+(2 rows)
+
+RESET enable_seqscan;
+-- GROUP BY / DISTINCT
+SELECT DISTINCT d FROM (VALUES ('1403-01-01'::jdate), ('1403-01-01'::jdate), ('1402-01-01'::jdate)) v(d) ORDER BY d;
+     d      
+------------
+ 1402-01-01
+ 1403-01-01
+(2 rows)
+
+SELECT d, count(*) FROM op_dates GROUP BY d ORDER BY d;
+     d      | count 
+------------+-------
+ 1401-01-01 |     1
+ 1402-12-29 |     1
+ 1403-01-01 |     1
+ 1403-05-01 |     1
+(4 rows)
+
+-- min/max aggregates
+SELECT min(d), max(d), pg_typeof(min(d)) FROM op_dates;
+    min     |    max     | pg_typeof 
+------------+------------+-----------
+ 1401-01-01 | 1403-05-01 | jdate
+(1 row)
+
+DROP TABLE op_dates;
