@@ -249,6 +249,24 @@ timestamptz_jdate(PG_FUNCTION_ARGS)
 	return DirectFunctionCall1(timestamptz_date, PG_GETARG_DATUM(0));
 }
 
+/*
+ * to_jdate(double precision) -- the inverse of EXTRACT(epoch FROM jdate),
+ * mirroring core's own to_timestamp(double precision). Unlike epoch
+ * extraction, going the other way genuinely needs a calendar day, which
+ * depends on the session's TimeZone -- same as the timestamptz -> jdate
+ * cast above, this just chains onto it via a plain float8 -> timestamptz
+ * conversion first.
+ */
+PG_FUNCTION_INFO_V1(jdate_from_epoch);
+Datum
+jdate_from_epoch(PG_FUNCTION_ARGS)
+{
+	float8		epoch = PG_GETARG_FLOAT8(0);
+	Datum		ts = DirectFunctionCall1(float8_timestamptz, Float8GetDatum(epoch));
+
+	return DirectFunctionCall1(timestamptz_date, ts);
+}
+
 /* ---------------------------------------------------------------------
  * jdate_part / extract / jdate_trunc
  * ------------------------------------------------------------------- */
@@ -266,7 +284,13 @@ jdate_decode_field(text *units)
 	type = DecodeUnits(0, lowunits, &val);
 	if (type == UNKNOWN_FIELD)
 		type = DecodeSpecial(0, lowunits, &val);
-	if (type != UNITS)
+
+	/*
+	 * "epoch" decodes as a RESERV special token (like "infinity"), not a
+	 * UNITS token -- core's own extract_date() treats it as a field name
+	 * anyway, so accept that one specific RESERV value here too.
+	 */
+	if (type != UNITS && !(type == RESERV && val == DTK_EPOCH))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unit \"%s\" not recognized for type jdate", lowunits)));
@@ -314,6 +338,14 @@ jdate_get_field(DateADT value, int val)
 			return DatumGetFloat8(DirectFunctionCall1(numeric_float8,
 													   DirectFunctionCall2(extract_date,
 																			PointerGetDatum(cstring_to_text(val == DTK_DOW ? "dow" : "isodow")),
+																			DateADTGetDatum(value))));
+		case DTK_EPOCH:
+			/* Likewise calendar-agnostic: a Unix timestamp counts seconds
+			 * since 1970-01-01 UTC regardless of which calendar the date
+			 * is displayed in, so this is the same day for both. */
+			return DatumGetFloat8(DirectFunctionCall1(numeric_float8,
+													   DirectFunctionCall2(extract_date,
+																			PointerGetDatum(cstring_to_text("epoch")),
 																			DateADTGetDatum(value))));
 		default:
 			ereport(ERROR,

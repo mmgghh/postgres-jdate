@@ -63,6 +63,10 @@ SELECT jdate_part('year', happened_on), jdate_part('quarter', happened_on) FROM 
 SELECT EXTRACT(year FROM happened_on) FROM events;   -- EXTRACT(...) works too
 SELECT jdate_trunc('month', happened_on) FROM events;
 
+-- Unix epoch (seconds since 1970-01-01 UTC), same as date/timestamp
+SELECT EXTRACT(epoch FROM '1403-01-01'::jdate);      -- 1710892800
+SELECT to_jdate(1710892800);                         -- 1403-01-01
+
 -- Jalali date + local clock time for a timestamptz, respecting the
 -- session's TimeZone (until a native jtimestamptz type ships -- see
 -- docs/design/)

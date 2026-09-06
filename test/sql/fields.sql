@@ -17,6 +17,11 @@ SELECT jdate_part('second', '1403-05-15'::jdate) AS f_second_zero;
 SELECT jdate_part('dow', '1403-05-15'::jdate) = date_part('dow', '1403-05-15'::jdate::date) AS dow_matches_gregorian;
 SELECT jdate_part('isodow', '1403-05-15'::jdate) = date_part('isodow', '1403-05-15'::jdate::date) AS isodow_matches_gregorian;
 
+-- epoch is calendar-agnostic too: must match the Gregorian answer for
+-- the identical underlying day
+SELECT jdate_part('epoch', '1403-05-15'::jdate) = date_part('epoch', '1403-05-15'::jdate::date) AS epoch_matches_gregorian;
+SELECT EXTRACT(epoch FROM '1403-01-01'::jdate) AS extract_epoch;
+
 -- unsupported unit
 SELECT jdate_part('week', '1403-05-15'::jdate);
 

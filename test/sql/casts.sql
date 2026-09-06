@@ -19,3 +19,12 @@ SELECT timestamptz '2024-03-20 15:30:00+00'::jdate;
 -- neither direction is implicit: plain comparisons across types must fail
 -- rather than silently converting through a different calendar
 SELECT '1403-01-01'::jdate = date '2024-03-20';
+
+-- to_jdate(double precision): the inverse of EXTRACT(epoch FROM jdate)
+SELECT to_jdate(extract(epoch from timestamptz '2024-03-20 12:00:00+00')) AS epoch_to_jdate;
+SELECT to_jdate(extract(epoch from '1403-01-01'::jdate::timestamptz)) = '1403-01-01'::jdate AS epoch_roundtrip;
+-- a plain integer literal works too, via implicit promotion to float8
+SELECT to_jdate(0) AS epoch_zero;
+-- fractional seconds don't change the calendar day
+SELECT to_jdate(extract(epoch from timestamptz '2024-03-20 12:00:00+00') + 0.75)
+     = to_jdate(extract(epoch from timestamptz '2024-03-20 12:00:00+00')) AS epoch_fraction_same_day;

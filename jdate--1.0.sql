@@ -190,6 +190,28 @@ CREATE FUNCTION jdate(timestamptz) RETURNS jdate
 CREATE CAST (timestamptz AS jdate) WITH FUNCTION jdate(timestamptz) AS ASSIGNMENT;
 
 -- ============================================================
+-- Unix epoch conversion
+-- ============================================================
+
+-- Epoch extraction needs no new function: it's calendar-agnostic (a Unix
+-- timestamp counts seconds since 1970-01-01 UTC regardless of which
+-- calendar the date is displayed in), so it's just another case in the
+-- jdate_part/EXTRACT machinery below -- see jdate_get_field's DTK_EPOCH
+-- case in jdate.c.
+--   SELECT EXTRACT(epoch FROM some_jdate);
+--   SELECT jdate_part('epoch', some_jdate);
+
+-- to_jdate(double precision): the inverse, mirroring core's own
+-- to_timestamp(double precision). Plain function, not a cast: like
+-- to_timestamp(), this is never applied implicitly or on assignment.
+-- STABLE (not IMMUTABLE) because resolving the epoch's calendar day
+-- depends on the session's TimeZone, same as the timestamptz -> jdate
+-- cast above.
+CREATE FUNCTION to_jdate(double precision) RETURNS jdate
+    AS 'MODULE_PATHNAME', 'jdate_from_epoch'
+    LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+-- ============================================================
 -- Field access: jdate_part / extract() / jdate_trunc
 -- ============================================================
 

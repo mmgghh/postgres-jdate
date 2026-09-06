@@ -54,3 +54,31 @@ ERROR:  operator does not exist: jdate = date
 LINE 1: SELECT '1403-01-01'::jdate = date '2024-03-20';
                                    ^
 HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+-- to_jdate(double precision): the inverse of EXTRACT(epoch FROM jdate)
+SELECT to_jdate(extract(epoch from timestamptz '2024-03-20 12:00:00+00')) AS epoch_to_jdate;
+ epoch_to_jdate 
+----------------
+ 1403-01-01
+(1 row)
+
+SELECT to_jdate(extract(epoch from '1403-01-01'::jdate::timestamptz)) = '1403-01-01'::jdate AS epoch_roundtrip;
+ epoch_roundtrip 
+-----------------
+ t
+(1 row)
+
+-- a plain integer literal works too, via implicit promotion to float8
+SELECT to_jdate(0) AS epoch_zero;
+ epoch_zero 
+------------
+ 1348-10-11
+(1 row)
+
+-- fractional seconds don't change the calendar day
+SELECT to_jdate(extract(epoch from timestamptz '2024-03-20 12:00:00+00') + 0.75)
+     = to_jdate(extract(epoch from timestamptz '2024-03-20 12:00:00+00')) AS epoch_fraction_same_day;
+ epoch_fraction_same_day 
+-------------------------
+ t
+(1 row)
+
