@@ -14,18 +14,29 @@
 #   dev/test-cluster.sh start   # start the local cluster (idempotent)
 #   dev/test-cluster.sh stop    # stop it
 #   dev/test-cluster.sh build   # compile jdate.so against the fetched headers
-#   dev/test-cluster.sh test    # build + run the pg_regress suite
-#   dev/test-cluster.sh check   # setup + start + test (the common case)
+#   dev/test-cluster.sh tests   # print the test list parsed from the Makefile
+#   dev/test-cluster.sh test [name ...]   # start + build + run pg_regress
+#   dev/test-cluster.sh check [name ...]  # setup + start + test (the common case)
+#
+# With no names, `test` and `check` run every entry of the Makefile's
+# REGRESS line. With names, only those run (in the order given). A subset
+# that does not include `io` gets the extension created up front, since
+# only io.sql runs CREATE EXTENSION.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Tests write relative paths under test/results, so always run from the root.
+cd "$ROOT"
 DEV="$ROOT/.dev"
 PGDATA="$DEV/pgdata"
 EXTDIR="$DEV/extdir"
 HEADERS="$DEV/pg18-headers"
 PORT="${JDATE_DEV_PORT:-55439}"
 PGBIN="/usr/lib/postgresql/18/bin"
+# Pin the client tools to the PG18 install; find/PATH can pick another major.
+PSQL="$PGBIN/psql"
+PG_REGRESS="${PGBIN%/bin}/lib/pgxs/src/test/regress/pg_regress"
 PG_DEV_DEB_URL="https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-18/postgresql-server-dev-18_18.6-1.pgdg12%2b2_amd64.deb"
 
 # A stable, short socket directory is required: PGDATA can be an
@@ -64,7 +75,9 @@ cmd_start() {
 			echo "dynamic_library_path = '\$libdir:$EXTDIR'"
 		} >> "$PGDATA/postgresql.conf"
 	fi
-	"$PGBIN/pg_ctl" -D "$PGDATA" -l "$DEV/server.log" -o "-p $PORT -k $SOCKDIR" start
+	# 9>&-: do not leak the harness lock fd into the long-lived postmaster,
+	# or the lock would stay held after this script exits.
+	"$PGBIN/pg_ctl" -D "$PGDATA" -l "$DEV/server.log" -o "-p $PORT -k $SOCKDIR" start 9>&-
 }
 
 cmd_stop() {
@@ -82,31 +95,79 @@ cmd_build() {
 		"$ROOT/jdate.control" > "$EXTDIR/extension/jdate.control"
 }
 
+# The test list lives in the Makefile's REGRESS line (kept on ONE line);
+# this is the single source of truth.
+regress_list() {
+	sed -n 's/^REGRESS[[:space:]]*=[[:space:]]*//p' "$ROOT/Makefile"
+}
+
+cmd_tests() {
+	regress_list
+}
+
+# Serialise harness runs: they share the cluster, the jdate_dev_test
+# database, extdir and test/results. The lock is held on fd 9 until this
+# script exits. Idempotent, so check and test can both call it.
+LOCKED=0
+take_lock() {
+	[ "$LOCKED" = 1 ] && return 0
+	mkdir -p "$DEV"
+	exec 9>"$DEV/harness.lock"
+	flock 9
+	LOCKED=1
+}
+
 cmd_test() {
+	take_lock
+	cmd_start
 	cmd_build
-	local pg_regress
-	pg_regress="$(find /usr/lib/postgresql -name pg_regress -print -quit)"
-	psql -h "$SOCKDIR" -p "$PORT" -d postgres \
+
+	local -a names
+	if [ "$#" -gt 0 ]; then
+		names=("$@")
+	else
+		# Word splitting of the one-line list is intended.
+		read -r -a names <<< "$(regress_list)"
+	fi
+	if [ "${#names[@]}" -eq 0 ]; then
+		echo "no tests: could not parse REGRESS from the Makefile" >&2
+		return 1
+	fi
+
+	# Only io.sql runs CREATE EXTENSION; for a subset without it, have
+	# pg_regress load the extension into the database it creates.
+	local pre=()
+	local n have_io=0
+	for n in "${names[@]}"; do
+		[ "$n" = io ] && have_io=1
+	done
+	[ "$have_io" = 1 ] || pre=(--load-extension=jdate)
+
+	"$PSQL" -h "$SOCKDIR" -p "$PORT" -d postgres -v ON_ERROR_STOP=1 \
 		-c "DROP DATABASE IF EXISTS jdate_dev_test;" \
 		-c "CREATE DATABASE jdate_dev_test;" >/dev/null
-	"$pg_regress" --host="$SOCKDIR" --port="$PORT" --user="$(whoami)" \
-		--dbname=jdate_dev_test \
+	"$PG_REGRESS" --host="$SOCKDIR" --port="$PORT" --user="$(whoami)" \
+		--dbname=jdate_dev_test "${pre[@]}" \
 		--inputdir="$ROOT/test" --outputdir="$ROOT/test" \
-		io casts operators arithmetic fields format
+		"${names[@]}"
 }
 
 cmd_check() {
+	take_lock
 	cmd_setup
 	cmd_start
-	cmd_test
+	cmd_test "$@"
 }
 
-case "${1:-check}" in
+CMD="${1:-check}"
+[ "$#" -gt 0 ] && shift
+case "$CMD" in
 	setup) cmd_setup ;;
 	start) cmd_start ;;
 	stop) cmd_stop ;;
-	build) cmd_build ;;
-	test) cmd_test ;;
-	check) cmd_check ;;
-	*) echo "usage: $0 {setup|start|stop|build|test|check}" >&2; exit 1 ;;
+	build) take_lock; cmd_build ;;
+	tests) cmd_tests ;;
+	test) cmd_test "$@" ;;
+	check) cmd_check "$@" ;;
+	*) echo "usage: $0 {setup|start|stop|build|tests|test [name ...]|check [name ...]}" >&2; exit 1 ;;
 esac

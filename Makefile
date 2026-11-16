@@ -3,6 +3,7 @@ OBJS = src/jalaali.o src/jdate.o
 EXTENSION = jdate
 DATA = jdate--1.0.sql
 DOCS = README.md
+# Keep REGRESS on ONE line: dev/test-cluster.sh parses it.
 REGRESS = io casts operators arithmetic fields format
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
