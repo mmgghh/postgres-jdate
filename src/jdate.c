@@ -126,8 +126,16 @@ Datum
 jdate_recv(PG_FUNCTION_ARGS)
 {
 	StringInfo	buf = (StringInfo) PG_GETARG_POINTER(0);
+	DateADT		result = (DateADT) pq_getmsgint(buf, sizeof(int32));
 
-	PG_RETURN_DATEADT((DateADT) pq_getmsgint(buf, sizeof(int32)));
+	/*
+	 * The wire format is date's, and a date can hold far more days than the
+	 * Jalali range, so a binary COPY or a binary-protocol parameter could
+	 * otherwise store a value that can never be displayed. Infinity and
+	 * -infinity pass.
+	 */
+	jdate_check_range(result);
+	PG_RETURN_DATEADT(result);
 }
 
 PG_FUNCTION_INFO_V1(jdate_send);
