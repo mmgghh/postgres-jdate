@@ -161,12 +161,39 @@ jalaali_to_jdn(int jy, int jm, int jd)
 		+ (jm - 1) * 31 - jdiv(jm, 7) * (jm - 7) + jd - 1;
 }
 
+/* Range endpoints, computed on first use and then reused. */
+static bool range_ready = false;
+static int	range_min_jdn;
+static int	range_max_jdn;
+
+static void
+init_range(void)
+{
+	range_min_jdn = jalaali_to_jdn(JALAALI_MIN_YEAR, 1, 1);
+	range_max_jdn = jalaali_to_jdn(JALAALI_MAX_YEAR, 12,
+								   jalaali_month_length(JALAALI_MAX_YEAR, 12));
+	range_ready = true;
+}
+
+int
+jalaali_min_jdn(void)
+{
+	if (!range_ready)
+		init_range();
+	return range_min_jdn;
+}
+
+int
+jalaali_max_jdn(void)
+{
+	if (!range_ready)
+		init_range();
+	return range_max_jdn;
+}
+
 bool
 jalaali_from_jdn(int jdn, JalaaliDate *out)
 {
-	int			first_jdn = jalaali_to_jdn(JALAALI_MIN_YEAR, 1, 1);
-	int			last_jdn = jalaali_to_jdn(JALAALI_MAX_YEAR, 12,
-										   jalaali_month_length(JALAALI_MAX_YEAR, 12));
 	int			gy,
 				gm,
 				gd,
@@ -174,7 +201,7 @@ jalaali_from_jdn(int jdn, JalaaliDate *out)
 				k;
 	JalCalResult r;
 
-	if (jdn < first_jdn || jdn > last_jdn)
+	if (jdn < jalaali_min_jdn() || jdn > jalaali_max_jdn())
 		return false;
 
 	jalaali_jdn_to_gregorian(jdn, &gy, &gm, &gd);
