@@ -14,6 +14,36 @@
 
 PG_MODULE_MAGIC;
 
+/*
+ * The one error for "this day is outside the supported Jalali range", shared
+ * by display (jdate_to_jalaali) and by every path that produces a jdate
+ * (jdate_check_range), so no out-of-range value can be stored and then fail
+ * on every later read.
+ */
+static void
+jdate_range_error(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+			 errmsg("jdate value is outside the supported Jalali range (years %d to %d)",
+					JALAALI_MIN_YEAR, JALAALI_MAX_YEAR)));
+}
+
+/*
+ * Raise 22008 unless a finite value lies within the Jalali range. Infinity
+ * and -infinity are always valid.
+ */
+static void
+jdate_check_range(DateADT value)
+{
+	if (DATE_NOT_FINITE(value))
+		return;
+
+	if (value < jalaali_min_jdn() - POSTGRES_EPOCH_JDATE ||
+		value > jalaali_max_jdn() - POSTGRES_EPOCH_JDATE)
+		jdate_range_error();
+}
+
 static JalaaliDate
 jdate_to_jalaali(DateADT value)
 {
@@ -25,10 +55,7 @@ jdate_to_jalaali(DateADT value)
 				 errmsg("cannot convert infinite jdate to a calendar date")));
 
 	if (!jalaali_from_jdn(value + POSTGRES_EPOCH_JDATE, &jd))
-		ereport(ERROR,
-				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-				 errmsg("jdate value is outside the supported Jalali range (years %d to %d)",
-						JALAALI_MIN_YEAR, JALAALI_MAX_YEAR)));
+		jdate_range_error();
 
 	return jd;
 }
@@ -194,18 +221,28 @@ jdate_larger(PG_FUNCTION_ARGS)
  * Arithmetic
  * ------------------------------------------------------------------- */
 
+/*
+ * Core's date_pli/date_mii handle infinity and int32 overflow; the result
+ * must then also lie within the Jalali range.
+ */
 PG_FUNCTION_INFO_V1(jdate_pli);
 Datum
 jdate_pli(PG_FUNCTION_ARGS)
 {
-	return DirectFunctionCall2(date_pli, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+	DateADT		result = DatumGetDateADT(DirectFunctionCall2(date_pli, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)));
+
+	jdate_check_range(result);
+	PG_RETURN_DATEADT(result);
 }
 
 PG_FUNCTION_INFO_V1(jdate_mii);
 Datum
 jdate_mii(PG_FUNCTION_ARGS)
 {
-	return DirectFunctionCall2(date_mii, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+	DateADT		result = DatumGetDateADT(DirectFunctionCall2(date_mii, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)));
+
+	jdate_check_range(result);
+	PG_RETURN_DATEADT(result);
 }
 
 PG_FUNCTION_INFO_V1(jdate_mi);
@@ -216,10 +253,23 @@ jdate_mi(PG_FUNCTION_ARGS)
 }
 
 /* ---------------------------------------------------------------------
- * Casts to/from timestamp and timestamptz -- delegate to core's own
- * date<->timestamp[tz] conversions, since jdate's stored value already
- * *is* a valid DateADT for the same calendar day.
+ * Casts to/from date, timestamp and timestamptz. jdate and date share one
+ * int32 representation (days since 2000-01-01), so converting jdate to
+ * date/timestamp[tz] delegates to core and is always valid. The other
+ * direction (date/timestamp[tz] -> jdate) accepts days that core's wider
+ * calendar allows but the Jalali algorithm cannot represent, so it
+ * validates the range.
  * ------------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(date_jdate);
+Datum
+date_jdate(PG_FUNCTION_ARGS)
+{
+	DateADT		value = PG_GETARG_DATEADT(0);
+
+	jdate_check_range(value);
+	PG_RETURN_DATEADT(value);
+}
 
 PG_FUNCTION_INFO_V1(jdate_timestamp);
 Datum
@@ -239,14 +289,20 @@ PG_FUNCTION_INFO_V1(timestamp_jdate);
 Datum
 timestamp_jdate(PG_FUNCTION_ARGS)
 {
-	return DirectFunctionCall1(timestamp_date, PG_GETARG_DATUM(0));
+	DateADT		result = DatumGetDateADT(DirectFunctionCall1(timestamp_date, PG_GETARG_DATUM(0)));
+
+	jdate_check_range(result);
+	PG_RETURN_DATEADT(result);
 }
 
 PG_FUNCTION_INFO_V1(timestamptz_jdate);
 Datum
 timestamptz_jdate(PG_FUNCTION_ARGS)
 {
-	return DirectFunctionCall1(timestamptz_date, PG_GETARG_DATUM(0));
+	DateADT		result = DatumGetDateADT(DirectFunctionCall1(timestamptz_date, PG_GETARG_DATUM(0)));
+
+	jdate_check_range(result);
+	PG_RETURN_DATEADT(result);
 }
 
 /*

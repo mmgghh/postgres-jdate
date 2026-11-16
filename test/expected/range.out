@@ -1,0 +1,247 @@
+-- Every path that produces a jdate must reject values outside the
+-- supported Jalali range (-0061-01-01 .. 3177-12-29, which is the
+-- Gregorian range 0560-03-20 .. 3799-03-19) with SQLSTATE 22008,
+-- instead of storing a value that can never be displayed again.
+SET DateStyle = 'ISO, YMD';
+SET timezone = 'UTC';
+\set VERBOSITY sqlstate
+-- the edge values themselves are valid
+SELECT '-0061-01-01'::jdate AS min_day, '3177-12-29'::jdate AS max_day;
+   min_day   |  max_day   
+-------------+------------
+ -0061-01-01 | 3177-12-29
+(1 row)
+
+SELECT '3177-12-28'::jdate + 1 AS reach_max_by_plus;
+ reach_max_by_plus 
+-------------------
+ 3177-12-29
+(1 row)
+
+SELECT '-0061-01-02'::jdate - 1 AS reach_min_by_minus;
+ reach_min_by_minus 
+--------------------
+ -0061-01-01
+(1 row)
+
+SELECT '3177-12-29'::jdate + 0 AS max_plus_zero;
+ max_plus_zero 
+---------------
+ 3177-12-29
+(1 row)
+
+SELECT '-0061-01-01'::jdate - 0 AS min_minus_zero;
+ min_minus_zero 
+----------------
+ -0061-01-01
+(1 row)
+
+SELECT '3177-12-29'::jdate - 1 AS max_minus_one;
+ max_minus_one 
+---------------
+ 3177-12-28
+(1 row)
+
+SELECT '-0061-01-01'::jdate + 1 AS min_plus_one;
+ min_plus_one 
+--------------
+ -0061-01-02
+(1 row)
+
+-- Out-of-range results must fail when computed. They are tested with
+-- IS NOT NULL so that the error cannot come from displaying the result
+-- (jdate_out has always rejected an out-of-range value).
+-- jdate +/- int past either edge
+SELECT ('3177-12-29'::jdate + 1) IS NOT NULL;
+ERROR:  22008
+SELECT ('-0061-01-01'::jdate - 1) IS NOT NULL;
+ERROR:  22008
+SELECT ('3177-12-29'::jdate + 2147483647) IS NOT NULL;
+ERROR:  22008
+SELECT ('-0061-01-01'::jdate - 2147483647) IS NOT NULL;
+ERROR:  22008
+SELECT ('-0061-01-01'::jdate + -1) IS NOT NULL;
+ERROR:  22008
+SELECT ('3177-12-29'::jdate - -1) IS NOT NULL;
+ERROR:  22008
+SELECT ('1403-01-01'::jdate + 2147483647) IS NOT NULL;
+ERROR:  22008
+SELECT ('1403-01-01'::jdate - 2147483647) IS NOT NULL;
+ERROR:  22008
+SELECT ('1403-01-01'::jdate + (-2147483647 - 1)) IS NOT NULL;
+ERROR:  22008
+SELECT ('1403-01-01'::jdate - (-2147483647 - 1)) IS NOT NULL;
+ERROR:  22008
+-- infinities are never changed by arithmetic
+SELECT 'infinity'::jdate + 1 AS inf_plus, 'infinity'::jdate - 1 AS inf_minus;
+ inf_plus | inf_minus 
+----------+-----------
+ infinity | infinity
+(1 row)
+
+SELECT '-infinity'::jdate + 1 AS ninf_plus, '-infinity'::jdate - 1 AS ninf_minus;
+ ninf_plus | ninf_minus 
+-----------+------------
+ -infinity | -infinity
+(1 row)
+
+SELECT 'infinity'::jdate + 2147483647 AS inf_plus_max;
+ inf_plus_max 
+--------------
+ infinity
+(1 row)
+
+-- date -> jdate: the Gregorian edges succeed, one day further fails
+SELECT date '0560-03-20'::jdate AS min_from_date, date '3799-03-19'::jdate AS max_from_date;
+ min_from_date | max_from_date 
+---------------+---------------
+ -0061-01-01   | 3177-12-29
+(1 row)
+
+SELECT (date '0560-03-19'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT (date '3799-03-20'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT (date '9999-12-31'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT (date '0001-01-01'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT (date '0001-01-01 BC'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT (date '5874897-12-31'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT (date '4714-11-24 BC'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT 'infinity'::date::jdate AS inf_from_date, '-infinity'::date::jdate AS ninf_from_date;
+ inf_from_date | ninf_from_date 
+---------------+----------------
+ infinity      | -infinity
+(1 row)
+
+SELECT jdate(date '1970-01-01') AS explicit_function_form;
+ explicit_function_form 
+------------------------
+ 1348-10-11
+(1 row)
+
+SELECT (jdate(date '9999-12-31')) IS NOT NULL;
+ERROR:  22008
+-- timestamp -> jdate
+SELECT timestamp '0560-03-20 00:00:00'::jdate AS min_from_ts, timestamp '3799-03-19 23:59:59.999999'::jdate AS max_from_ts;
+ min_from_ts | max_from_ts 
+-------------+-------------
+ -0061-01-01 | 3177-12-29
+(1 row)
+
+SELECT (timestamp '0560-03-19 23:59:59.999999'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT (timestamp '3799-03-20 00:00:00'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT (timestamp '9999-12-31 00:00:00'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT (timestamp '0001-01-01 00:00:00'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT 'infinity'::timestamp::jdate AS inf_from_ts, '-infinity'::timestamp::jdate AS ninf_from_ts;
+ inf_from_ts | ninf_from_ts 
+-------------+--------------
+ infinity    | -infinity
+(1 row)
+
+-- timestamptz -> jdate (session timezone is UTC here)
+SELECT timestamptz '0560-03-20 00:00:00+00'::jdate AS min_from_tstz, timestamptz '3799-03-19 23:59:59.999999+00'::jdate AS max_from_tstz;
+ min_from_tstz | max_from_tstz 
+---------------+---------------
+ -0061-01-01   | 3177-12-29
+(1 row)
+
+SELECT (timestamptz '0560-03-19 23:59:59.999999+00'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT (timestamptz '3799-03-20 00:00:00+00'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT (timestamptz '9999-12-31 00:00:00+00'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT (timestamptz '0001-01-01 00:00:00+00'::jdate) IS NOT NULL;
+ERROR:  22008
+SELECT 'infinity'::timestamptz::jdate AS inf_from_tstz, '-infinity'::timestamptz::jdate AS ninf_from_tstz;
+ inf_from_tstz | ninf_from_tstz 
+---------------+----------------
+ infinity      | -infinity
+(1 row)
+
+-- the date -> jdate cast validates; jdate -> date stays a free cast
+SELECT castsource::regtype AS source, casttarget::regtype AS target,
+       castfunc::regprocedure AS func, castcontext
+FROM pg_cast WHERE 'jdate'::regtype IN (castsource, casttarget)
+ORDER BY castsource::regtype::text COLLATE "C", casttarget::regtype::text COLLATE "C";
+           source            |           target            |                func                | castcontext 
+-----------------------------+-----------------------------+------------------------------------+-------------
+ date                        | jdate                       | jdate(date)                        | a
+ jdate                       | date                        | -                                  | a
+ jdate                       | timestamp with time zone    | timestamptz(jdate)                 | a
+ jdate                       | timestamp without time zone | "timestamp"(jdate)                 | a
+ timestamp with time zone    | jdate                       | jdate(timestamp with time zone)    | a
+ timestamp without time zone | jdate                       | jdate(timestamp without time zone) | a
+(6 rows)
+
+SELECT provolatile, proisstrict, proparallel
+FROM pg_proc WHERE oid = 'jdate(date)'::regprocedure;
+ provolatile | proisstrict | proparallel 
+-------------+-------------+-------------
+ i           | t           | s
+(1 row)
+
+SELECT '3177-12-29'::jdate::date AS free_cast_back;
+ free_cast_back 
+----------------
+ 3799-03-19
+(1 row)
+
+-- the original symptom: one stored out-of-range value made every later
+-- SELECT on the table fail. The insert must fail instead, leaving the
+-- table empty and still readable.
+CREATE TABLE range_t (d jdate);
+INSERT INTO range_t SELECT date '9999-12-31';
+ERROR:  22008
+INSERT INTO range_t SELECT date '0001-01-01';
+ERROR:  22008
+INSERT INTO range_t SELECT timestamp '9999-12-31 00:00:00';
+ERROR:  22008
+INSERT INTO range_t SELECT timestamptz '9999-12-31 00:00:00+00';
+ERROR:  22008
+INSERT INTO range_t VALUES ('3177-12-29'::jdate + 1);
+ERROR:  22008
+INSERT INTO range_t SELECT d + 1 FROM (VALUES ('3177-12-29'::jdate)) AS v(d);
+ERROR:  22008
+SELECT count(*) AS rows_after_failed_inserts FROM range_t;
+ rows_after_failed_inserts 
+---------------------------
+                         0
+(1 row)
+
+SELECT * FROM range_t;
+ d 
+---
+(0 rows)
+
+-- valid values (edges, infinities, a converted date) are stored and read back
+INSERT INTO range_t SELECT date '3799-03-19';
+INSERT INTO range_t SELECT date '0560-03-20';
+INSERT INTO range_t SELECT 'infinity'::date;
+INSERT INTO range_t VALUES ('1403-01-01'::jdate + 10);
+SELECT * FROM range_t ORDER BY d;
+      d      
+-------------
+ -0061-01-01
+ 1403-01-11
+ 3177-12-29
+ infinity
+(4 rows)
+
+SELECT count(*) AS readable_rows FROM range_t;
+ readable_rows 
+---------------
+             4
+(1 row)
+
+DROP TABLE range_t;
+\set VERBOSITY default

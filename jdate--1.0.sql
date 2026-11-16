@@ -43,15 +43,24 @@ COMMENT ON TYPE jdate IS 'Jalali (Persian) calendar date, 4 bytes, binary-compat
 
 -- jdate and date share the exact same internal representation (days
 -- since 2000-01-01, i.e. the same Julian Day Number minus a fixed
--- offset) -- only their text I/O differs. The cast is therefore a pure
--- reinterpretation: WITHOUT FUNCTION, zero bytes touched.
+-- offset) -- only their text I/O differs. jdate -> date therefore needs no
+-- conversion and is always valid: WITHOUT FUNCTION, zero bytes touched.
+--
+-- date -> jdate is NOT free: date covers far more days (4714 BC to
+-- 5874897 AD) than the Jalali algorithm (-0061-01-01 .. 3177-12-29), and a
+-- stored out-of-range value could never be displayed again. It goes
+-- through jdate(date), which raises SQLSTATE 22008 outside the range.
 --
 -- ASSIGNMENT (not IMPLICIT): a jdate and a date can represent the same
 -- physical day while displaying completely different digits, so silently
 -- converting one to the other inside an ordinary comparison would be
 -- surprising. An explicit cast, or an assignment context, is required.
 CREATE CAST (jdate AS date) WITHOUT FUNCTION AS ASSIGNMENT;
-CREATE CAST (date AS jdate) WITHOUT FUNCTION AS ASSIGNMENT;
+
+CREATE FUNCTION jdate(date) RETURNS jdate
+    AS 'MODULE_PATHNAME', 'date_jdate'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE CAST (date AS jdate) WITH FUNCTION jdate(date) AS ASSIGNMENT;
 
 -- ============================================================
 -- Comparison operators, btree + hash opclasses
