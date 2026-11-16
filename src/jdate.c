@@ -314,21 +314,52 @@ timestamptz_jdate(PG_FUNCTION_ARGS)
 }
 
 /*
- * to_jdate(double precision) -- the inverse of EXTRACT(epoch FROM jdate),
- * mirroring core's own to_timestamp(double precision). Unlike epoch
- * extraction, going the other way genuinely needs a calendar day, which
- * depends on the session's TimeZone -- same as the timestamptz -> jdate
- * cast above, this just chains onto it via a plain float8 -> timestamptz
- * conversion first.
+ * to_jdate(double precision) -- the inverse of EXTRACT(epoch FROM jdate): the
+ * Jalali date of the UTC day that contains the given Unix timestamp.
+ *
+ * This is plain arithmetic on the epoch. Unlike core's to_timestamp(), which
+ * yields a timestamptz whose calendar day depends on the session TimeZone,
+ * the session zone plays no part here, so the result is the same in every
+ * zone and the function is IMMUTABLE (usable in index expressions).
  */
 PG_FUNCTION_INFO_V1(jdate_from_epoch);
 Datum
 jdate_from_epoch(PG_FUNCTION_ARGS)
 {
 	float8		epoch = PG_GETARG_FLOAT8(0);
-	Datum		ts = DirectFunctionCall1(float8_timestamptz, Float8GetDatum(epoch));
+	int64		secs;
+	int64		days;
+	DateADT		result;
 
-	return DirectFunctionCall1(timestamptz_date, ts);
+	if (isinf(epoch))
+		PG_RETURN_DATEADT(epoch < 0 ? DATEVAL_NOBEGIN : DATEVAL_NOEND);
+
+	/*
+	 * Reject anything outside the Jalali range before narrowing the double to
+	 * an integer. The bounds are the epochs of the first instant of the first
+	 * supported day and of the first instant after the last one: exact
+	 * doubles (multiples of 86400, far below 2^53). The test is written
+	 * negated so that NaN fails it too.
+	 */
+	if (!(epoch >= (double) (jalaali_min_jdn() - UNIX_EPOCH_JDATE) * SECS_PER_DAY &&
+		  epoch < (double) (jalaali_max_jdn() - UNIX_EPOCH_JDATE + 1) * SECS_PER_DAY))
+		jdate_range_error();
+
+	/*
+	 * Floor to whole seconds, then divide with integer floor division. C's /
+	 * truncates toward zero, which would put the second before the Unix epoch
+	 * (and every earlier negative second) on the wrong day.
+	 */
+	secs = (int64) floor(epoch);
+	days = secs / SECS_PER_DAY;
+	if (secs % SECS_PER_DAY < 0)
+		days--;
+
+	result = (DateADT) (days - (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE));
+
+	/* Cannot fail after the test above; it keeps the invariant in one place. */
+	jdate_check_range(result);
+	PG_RETURN_DATEADT(result);
 }
 
 /* ---------------------------------------------------------------------

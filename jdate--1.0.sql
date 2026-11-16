@@ -213,12 +213,13 @@ CREATE CAST (timestamptz AS jdate) WITH FUNCTION jdate(timestamptz) AS ASSIGNMEN
 -- to_jdate(double precision): the inverse, mirroring core's own
 -- to_timestamp(double precision). Plain function, not a cast: like
 -- to_timestamp(), this is never applied implicitly or on assignment.
--- STABLE (not IMMUTABLE) because resolving the epoch's calendar day
--- depends on the session's TimeZone, same as the timestamptz -> jdate
--- cast above.
+-- It returns the Jalali date of the UTC day containing the Unix timestamp
+-- (infinity for +/-Infinity; SQLSTATE 22008 for NaN or an epoch outside the
+-- supported range). It is pure arithmetic on the epoch: the session
+-- TimeZone is irrelevant, so it is IMMUTABLE and can be indexed.
 CREATE FUNCTION to_jdate(double precision) RETURNS jdate
     AS 'MODULE_PATHNAME', 'jdate_from_epoch'
-    LANGUAGE C STABLE STRICT PARALLEL SAFE;
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- ============================================================
 -- Field access: jdate_part / extract() / jdate_trunc
