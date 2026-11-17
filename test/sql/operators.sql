@@ -28,3 +28,101 @@ SELECT d, count(*) FROM op_dates GROUP BY d ORDER BY d;
 SELECT min(d), max(d), pg_typeof(min(d)) FROM op_dates;
 
 DROP TABLE op_dates;
+
+-- ---------------------------------------------------------------------
+-- btree support functions: jdate_ops carries core's date sort support
+-- (2) and btequalimage (4), no skip support; amvalidate accepts it
+-- ---------------------------------------------------------------------
+SELECT amprocnum, amproc::regprocedure
+FROM pg_amproc
+WHERE amprocfamily = (SELECT opcfamily FROM pg_opclass WHERE opcname = 'jdate_ops')
+ORDER BY amprocnum;
+
+SELECT amvalidate(oid) AS jdate_ops_valid
+FROM pg_opclass WHERE opcname = 'jdate_ops';
+
+-- ordering through the sort support path: duplicates, negative years, both
+-- range edges and infinity (positive and negative), 4,000 rows
+CREATE TABLE op_sort (id int, d jdate);
+INSERT INTO op_sort
+SELECT g, CASE
+        WHEN g % 50 = 0 THEN 'infinity'::jdate
+        WHEN g % 50 = 1 THEN '-infinity'::jdate
+        WHEN g % 50 = 2 THEN '-0061-01-01'::jdate
+        WHEN g % 50 = 3 THEN '3177-12-29'::jdate
+        ELSE '-0061-01-01'::jdate + ((g * 7919) % 1183000)::int
+    END
+FROM generate_series(1, 4000) g;
+
+-- the ORDER BY result is non-decreasing, agrees with sorting by the
+-- equivalent core date (infinity included) and keeps every row
+SELECT count(*) AS rows_sorted,
+       count(*) FILTER (WHERE d < prev_d) AS inversions
+FROM (SELECT d, lag(d) OVER (ORDER BY d, id) AS prev_d FROM op_sort) s;
+
+SELECT (SELECT array_agg(id ORDER BY d, id) FROM op_sort)
+     = (SELECT array_agg(id ORDER BY d::date, id) FROM op_sort) AS same_order_as_date;
+
+SELECT min(d), max(d), count(DISTINCT d) > 3000 AS many_distinct,
+       count(*) - count(DISTINCT d) > 0 AS has_duplicates
+FROM op_sort;
+
+-- btree build over heavy duplicates (20 distinct values, 20,000 rows): the
+-- deduplicated index is smaller than the same index without deduplication
+-- (so the opclass really is deduplication-safe) and returns the same rows
+CREATE TABLE op_dup (id int, d jdate);
+INSERT INTO op_dup
+SELECT g, CASE g % 20
+        WHEN 0 THEN 'infinity'::jdate
+        WHEN 1 THEN '-infinity'::jdate
+        WHEN 2 THEN '-0061-01-01'::jdate
+        WHEN 3 THEN '-0001-12-29'::jdate
+        WHEN 4 THEN '0000-01-01'::jdate
+        ELSE '1403-01-01'::jdate + (g % 20)
+    END
+FROM generate_series(1, 20000) g;
+CREATE INDEX op_dup_dedup ON op_dup (d) WITH (deduplicate_items = on);
+CREATE INDEX op_dup_nodedup ON op_dup (d) WITH (deduplicate_items = off);
+SELECT pg_relation_size('op_dup_dedup') < pg_relation_size('op_dup_nodedup') AS dedup_smaller;
+DROP INDEX op_dup_nodedup;
+
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+EXPLAIN (COSTS off) SELECT id FROM op_dup WHERE d = '-0001-12-29'::jdate;
+SELECT d, count(*) AS idx_rows, sum(id) AS idx_sum FROM op_dup
+WHERE d IN ('infinity', '-infinity', '-0061-01-01', '-0001-12-29', '0000-01-01', '1403-01-10')
+GROUP BY d ORDER BY d;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SELECT d, count(*) AS seq_rows, sum(id) AS seq_sum FROM op_dup
+WHERE d IN ('infinity', '-infinity', '-0061-01-01', '-0001-12-29', '0000-01-01', '1403-01-10')
+GROUP BY d ORDER BY d;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+DROP TABLE op_dup;
+
+-- the same on the 4,000-row table: index scan equals sequential scan
+CREATE INDEX op_sort_idx ON op_sort (d);
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) AS idx_infinity, sum(id) AS idx_infinity_sum FROM op_sort WHERE d = 'infinity'::jdate;
+SELECT count(*) AS idx_neg_infinity FROM op_sort WHERE d = '-infinity'::jdate;
+SELECT count(*) AS idx_min_edge FROM op_sort WHERE d = '-0061-01-01'::jdate;
+SELECT count(*) AS idx_range, sum(id) AS idx_range_sum
+FROM op_sort WHERE d BETWEEN '-0010-01-01'::jdate AND '1403-01-01'::jdate;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) AS seq_infinity, sum(id) AS seq_infinity_sum FROM op_sort WHERE d = 'infinity'::jdate;
+SELECT count(*) AS seq_neg_infinity FROM op_sort WHERE d = '-infinity'::jdate;
+SELECT count(*) AS seq_min_edge FROM op_sort WHERE d = '-0061-01-01'::jdate;
+SELECT count(*) AS seq_range, sum(id) AS seq_range_sum
+FROM op_sort WHERE d BETWEEN '-0010-01-01'::jdate AND '1403-01-01'::jdate;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
+
+DROP TABLE op_sort;

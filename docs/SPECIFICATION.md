@@ -421,7 +421,7 @@ and `1403-01-01` (01:30) in `Asia/Tehran`; `to_jdate(1710885600)` is
 
 | Operator class | Access method | Default? | Contains |
 | --- | --- | --- | --- |
-| `jdate_ops` | btree | yes | `<` `<=` `=` `>=` `>`; support function 1 `jdate_cmp` |
+| `jdate_ops` | btree | yes | `<` `<=` `=` `>=` `>`; support function 1 `jdate_cmp`, 2 `date_sortsupport` and 4 `btequalimage` (core's own functions) |
 | `jdate_hash_ops` | hash | yes | `=`; support function 1 `jdate_hash` (`hashint4`) and 2 `jdate_hash_extended` (`hashint4extended`, seeded, 64-bit) |
 
 Because both exist, `jdate` columns work with btree and hash indexes, merge and
@@ -430,6 +430,14 @@ BY HASH` (which needs the extended hash function). `amvalidate` accepts both
 classes. `=` is declared `HASHES, MERGES` with `eqsel`/`eqjoinsel`; the
 ordering operators use the `scalar*sel` estimators. `min`/`max` declare
 `SORTOP`. There are no GiST, GIN, BRIN or SP-GiST operator classes.
+
+`jdate` is a 4-byte day count with the same representation as `date`, so
+`jdate_ops` reuses core's `date_sortsupport` (support function 2, faster sorts
+and index builds on the integer value) and `btequalimage` (support function 4,
+always true: equal `jdate` values are bitwise identical, so btree
+deduplication of duplicate keys is allowed). Both functions exist on PostgreSQL
+16, 17 and 18. There is no skip support (function 6): it exists only on
+PostgreSQL 18 and is left for later.
 
 ## Function volatility and parallel safety
 

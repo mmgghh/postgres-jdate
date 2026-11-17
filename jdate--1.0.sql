@@ -123,7 +123,12 @@ CREATE OPERATOR CLASS jdate_ops
         OPERATOR 3 =,
         OPERATOR 4 >=,
         OPERATOR 5 >,
-        FUNCTION 1 jdate_cmp(jdate, jdate);
+        FUNCTION 1 jdate_cmp(jdate, jdate),
+        -- jdate is an int32 day count, binary compatible with core's date,
+        -- so core's date sort support and btequalimage apply unchanged.
+        -- No skip support (function 6): it exists only on PG 18.
+        FUNCTION 2 date_sortsupport(internal),
+        FUNCTION 4 btequalimage(oid);
 
 CREATE OPERATOR CLASS jdate_hash_ops
     DEFAULT FOR TYPE jdate USING hash AS
