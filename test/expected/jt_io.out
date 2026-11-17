@@ -745,9 +745,1228 @@ SELECT t FROM jt_io_target;
 (1 row)
 
 \set VERBOSITY default
+-- =====================================================================
+-- jtimestamptz: the same I/O for a timestamp with time zone. The text is
+-- always printed in the session zone with a numeric offset, so every block
+-- sets timezone explicitly. The valid range is the safe range (the Jalali
+-- range shrunk by 16 hours at both ends), checked on the UTC instant.
+-- =====================================================================
+SET DateStyle = 'ISO, YMD';
+SET timezone = 'UTC';
+-- ---------------------------------------------------------------------
+-- valid input and output
+-- ---------------------------------------------------------------------
+SELECT '1403-01-01 00:00:00'::jtimestamptz AS no_zone_is_session_zone;
+ no_zone_is_session_zone 
+-------------------------
+ 1403-01-01 00:00:00+00
+(1 row)
+
+SELECT '1403-01-01'::jtimestamptz AS date_only_is_midnight;
+ date_only_is_midnight  
+------------------------
+ 1403-01-01 00:00:00+00
+(1 row)
+
+SELECT '1395-12-30 12:00:00'::jtimestamptz AS leap_day;
+        leap_day        
+------------------------
+ 1395-12-30 12:00:00+00
+(1 row)
+
+-- offsets in the text: hours, hours:minutes, with seconds, Z, names, abbreviations
+SELECT '1403-01-01 12:00:00+03:30'::jtimestamptz AS hh_mm;
+         hh_mm          
+------------------------
+ 1403-01-01 08:30:00+00
+(1 row)
+
+SELECT '1403-01-01 12:00:00+03'::jtimestamptz AS hh;
+           hh           
+------------------------
+ 1403-01-01 09:00:00+00
+(1 row)
+
+SELECT '1403-01-01 12:00:00-03:30'::jtimestamptz AS negative;
+        negative        
+------------------------
+ 1403-01-01 15:30:00+00
+(1 row)
+
+SELECT '1403-01-01 12:00:00+03:30:15'::jtimestamptz AS with_seconds;
+      with_seconds      
+------------------------
+ 1403-01-01 08:29:45+00
+(1 row)
+
+SELECT '1403-01-01T12:00:00Z'::jtimestamptz AS z_suffix, '1403-01-01 12:00:00 z'::jtimestamptz AS lower_z;
+        z_suffix        |        lower_z         
+------------------------+------------------------
+ 1403-01-01 12:00:00+00 | 1403-01-01 12:00:00+00
+(1 row)
+
+SELECT '1403-01-01 12:00 Asia/Tehran'::jtimestamptz AS zone_name;
+       zone_name        
+------------------------
+ 1403-01-01 08:30:00+00
+(1 row)
+
+SELECT '1403-01-01 12:00 America/New_York'::jtimestamptz AS zone_name_with_dst;
+   zone_name_with_dst   
+------------------------
+ 1403-01-01 16:00:00+00
+(1 row)
+
+SELECT '1403-06-01 12:00 America/New_York'::jtimestamptz AS zone_name_without_dst;
+ zone_name_without_dst  
+------------------------
+ 1403-06-01 16:00:00+00
+(1 row)
+
+SELECT '1403-01-01 12:00 EST'::jtimestamptz AS abbreviation;
+      abbreviation      
+------------------------
+ 1403-01-01 17:00:00+00
+(1 row)
+
+SELECT '1403-01-01 12:00 UTC'::jtimestamptz AS utc_name;
+        utc_name        
+------------------------
+ 1403-01-01 12:00:00+00
+(1 row)
+
+SELECT '1403-01-01 12:00:00 +15:59:59'::jtimestamptz AS largest_offset;
+     largest_offset     
+------------------------
+ 1402-12-29 20:00:01+00
+(1 row)
+
+SELECT '1403-01-01 12:00:00 -15:59:59'::jtimestamptz AS largest_negative_offset;
+ largest_negative_offset 
+-------------------------
+ 1403-01-02 03:59:59+00
+(1 row)
+
+-- the same instant, written four ways
+SELECT s, s::jtimestamptz AS instant
+FROM (VALUES ('1403-01-01 12:00:00+00'), ('1403-01-01 15:30:00+03:30'),
+             ('1403-01-01 07:00:00-05'), ('1403-01-01 12:00:00 Z')) v(s);
+             s             |        instant         
+---------------------------+------------------------
+ 1403-01-01 12:00:00+00    | 1403-01-01 12:00:00+00
+ 1403-01-01 15:30:00+03:30 | 1403-01-01 12:00:00+00
+ 1403-01-01 07:00:00-05    | 1403-01-01 12:00:00+00
+ 1403-01-01 12:00:00 Z     | 1403-01-01 12:00:00+00
+(4 rows)
+
+-- fractional seconds, separators and time notations core accepts
+SELECT '1403-05-15 12:34:56.123456+00'::jtimestamptz;
+         jtimestamptz          
+-------------------------------
+ 1403-05-15 12:34:56.123456+00
+(1 row)
+
+SELECT '1403-05-15 12:34:56.123456789+00'::jtimestamptz AS rounds_up;
+           rounds_up           
+-------------------------------
+ 1403-05-15 12:34:56.123457+00
+(1 row)
+
+SELECT '1403-05-15 12:34:56.5'::jtimestamptz AS half_second;
+       half_second        
+--------------------------
+ 1403-05-15 12:34:56.5+00
+(1 row)
+
+SELECT '1403-05-15T12:34'::jtimestamptz AS t_separator_no_seconds;
+ t_separator_no_seconds 
+------------------------
+ 1403-05-15 12:34:00+00
+(1 row)
+
+SELECT '1403-05-15 24:00:00'::jtimestamptz AS twenty_four_is_next_day;
+ twenty_four_is_next_day 
+-------------------------
+ 1403-05-16 00:00:00+00
+(1 row)
+
+SELECT '1403-12-29 24:00:00'::jtimestamptz AS twenty_four_crosses_the_year;
+ twenty_four_crosses_the_year 
+------------------------------
+ 1403-12-30 00:00:00+00
+(1 row)
+
+SELECT '1403-05-15 12:00 AM'::jtimestamptz, '1403-05-15 12:00 PM'::jtimestamptz,
+       '1403-05-15 11:59:59 PM'::jtimestamptz;
+      jtimestamptz      |      jtimestamptz      |      jtimestamptz      
+------------------------+------------------------+------------------------
+ 1403-05-15 00:00:00+00 | 1403-05-15 12:00:00+00 | 1403-05-15 23:59:59+00
+(1 row)
+
+SELECT '1403-05-15 12:34:56 AD'::jtimestamptz AS ad_is_harmless;
+     ad_is_harmless     
+------------------------
+ 1403-05-15 12:34:56+00
+(1 row)
+
+-- the same leniency as jdate_in
+SELECT ' 1403-05-15 12:34:56'::jtimestamptz AS leading_space;
+     leading_space      
+------------------------
+ 1403-05-15 12:34:56+00
+(1 row)
+
+SELECT '+1403-05-15 12:34:56'::jtimestamptz AS signed_year;
+      signed_year       
+------------------------
+ 1403-05-15 12:34:56+00
+(1 row)
+
+SELECT '1403 - 05 - 15 12:34:56'::jtimestamptz AS spaced_dashes;
+     spaced_dashes      
+------------------------
+ 1403-05-15 12:34:56+00
+(1 row)
+
+SELECT '1403-05-15 12:34:56  '::jtimestamptz AS trailing_space;
+     trailing_space     
+------------------------
+ 1403-05-15 12:34:56+00
+(1 row)
+
+SELECT '0000000000000001403-05-15 12:00'::jtimestamptz AS leading_zeros;
+     leading_zeros      
+------------------------
+ 1403-05-15 12:00:00+00
+(1 row)
+
+-- no zone in the text: the session zone is used, so the instant differs
+SET timezone = 'Asia/Tehran';
+SELECT '1403-01-01 00:00:00'::jtimestamptz AS tehran_midnight;
+      tehran_midnight      
+---------------------------
+ 1403-01-01 00:00:00+03:30
+(1 row)
+
+SET timezone = 'UTC';
+SELECT '1403-01-01 00:00:00'::jtimestamptz AS utc_midnight;
+      utc_midnight      
+------------------------
+ 1403-01-01 00:00:00+00
+(1 row)
+
+-- every output is the same text again on input, in the same session zone
+SELECT s, s::jtimestamptz::text = s AS round_trips
+FROM (VALUES ('-0061-01-01 16:00:00+00'), ('3177-12-29 07:59:59.999999+00'),
+             ('1403-01-01 00:00:00+00'), ('1402-12-29 23:59:59.000001+00'),
+             ('1395-12-30 12:00:00.5+00'), ('infinity'), ('-infinity')) v(s);
+               s               | round_trips 
+-------------------------------+-------------
+ -0061-01-01 16:00:00+00       | t
+ 3177-12-29 07:59:59.999999+00 | t
+ 1403-01-01 00:00:00+00        | t
+ 1402-12-29 23:59:59.000001+00 | t
+ 1395-12-30 12:00:00.5+00      | t
+ infinity                      | t
+ -infinity                     | t
+(7 rows)
+
+SET timezone = 'Asia/Tehran';
+SELECT s, s::jtimestamptz::text = s AS round_trips
+FROM (VALUES ('1403-01-01 12:00:00+03:30'), ('1348-10-11 03:30:00+03:30'),
+             ('1200-01-01 00:00:00+03:25:44')) v(s);
+              s               | round_trips 
+------------------------------+-------------
+ 1403-01-01 12:00:00+03:30    | t
+ 1348-10-11 03:30:00+03:30    | t
+ 1200-01-01 00:00:00+03:25:44 | t
+(3 rows)
+
+SET timezone = 'UTC';
+-- ---------------------------------------------------------------------
+-- output: the instant in the session zone, numeric offset +HH, +HH:MM, +HH:MM:SS
+-- ---------------------------------------------------------------------
+-- 1403-01-01 12:00 UTC, as seen in different zones
+SET timezone = 'UTC';
+SELECT '1403-01-01 12:00:00+00'::jtimestamptz AS utc;
+          utc           
+------------------------
+ 1403-01-01 12:00:00+00
+(1 row)
+
+SET timezone = 'Asia/Tehran';
+SELECT '1403-01-01 12:00:00+00'::jtimestamptz AS tehran;
+          tehran           
+---------------------------
+ 1403-01-01 15:30:00+03:30
+(1 row)
+
+SET timezone = 'Asia/Kolkata';
+SELECT '1403-01-01 12:00:00+00'::jtimestamptz AS kolkata;
+          kolkata          
+---------------------------
+ 1403-01-01 17:30:00+05:30
+(1 row)
+
+SET timezone = 'Asia/Kathmandu';
+SELECT '1403-01-01 12:00:00+00'::jtimestamptz AS kathmandu;
+         kathmandu         
+---------------------------
+ 1403-01-01 17:45:00+05:45
+(1 row)
+
+SET timezone = 'America/New_York';
+SELECT '1403-01-01 12:00:00+00'::jtimestamptz AS new_york;
+        new_york        
+------------------------
+ 1403-01-01 08:00:00-04
+(1 row)
+
+SET timezone = 'Pacific/Kiritimati';
+SELECT '1403-01-01 12:00:00+00'::jtimestamptz AS kiritimati_plus_14;
+   kiritimati_plus_14   
+------------------------
+ 1403-01-02 02:00:00+14
+(1 row)
+
+SET timezone = 'Pacific/Pago_Pago';
+SELECT '1403-01-01 12:00:00+00'::jtimestamptz AS pago_pago_minus_11;
+   pago_pago_minus_11   
+------------------------
+ 1403-01-01 01:00:00-11
+(1 row)
+
+SET timezone = 'UTC';
+-- the local date can differ from the UTC one, in either direction
+SET timezone = 'Pacific/Kiritimati';
+SELECT '1403-12-29 23:00:00+00'::jtimestamptz AS next_day_locally;
+    next_day_locally    
+------------------------
+ 1403-12-30 13:00:00+14
+(1 row)
+
+SET timezone = 'Pacific/Pago_Pago';
+SELECT '1403-01-01 02:00:00+00'::jtimestamptz AS previous_day_locally;
+  previous_day_locally  
+------------------------
+ 1402-12-29 15:00:00-11
+(1 row)
+
+SET timezone = 'UTC';
+-- the same instant prints differently, and reads back as the same instant
+SET timezone = 'UTC';
+SELECT '1403-01-01 12:00:00+00'::jtimestamptz::text AS in_utc \gset
+SET timezone = 'Asia/Tehran';
+SELECT '1403-01-01 12:00:00+00'::jtimestamptz::text AS in_tehran \gset
+SELECT :'in_utc' AS in_utc, :'in_tehran' AS in_tehran,
+       :'in_tehran'::jtimestamptz::text = :'in_tehran' AS tehran_text_reads_back,
+       :'in_utc'::jtimestamptz::text = :'in_tehran' AS same_instant_in_both;
+         in_utc         |         in_tehran         | tehran_text_reads_back | same_instant_in_both 
+------------------------+---------------------------+------------------------+----------------------
+ 1403-01-01 12:00:00+00 | 1403-01-01 15:30:00+03:30 | t                      | t
+(1 row)
+
+SET timezone = 'UTC';
+SELECT :'in_tehran'::jtimestamptz::text AS tehran_text_in_utc;
+   tehran_text_in_utc   
+------------------------
+ 1403-01-01 12:00:00+00
+(1 row)
+
+-- epoch is 1970-01-01 00:00:00 UTC, which is 1348-10-11 in the Jalali calendar
+SELECT 'epoch'::jtimestamptz AS epoch_utc;
+       epoch_utc        
+------------------------
+ 1348-10-11 00:00:00+00
+(1 row)
+
+SET timezone = 'Asia/Tehran';
+SELECT 'epoch'::jtimestamptz AS epoch_tehran;
+       epoch_tehran        
+---------------------------
+ 1348-10-11 03:30:00+03:30
+(1 row)
+
+SELECT 'EPOCH'::jtimestamptz AS epoch_uppercase;
+      epoch_uppercase      
+---------------------------
+ 1348-10-11 03:30:00+03:30
+(1 row)
+
+SET timezone = 'America/New_York';
+SELECT 'epoch'::jtimestamptz AS epoch_new_york_previous_day;
+ epoch_new_york_previous_day 
+-----------------------------
+ 1348-10-10 19:00:00-05
+(1 row)
+
+SET timezone = 'UTC';
+SELECT 'infinity'::jtimestamptz, '-infinity'::jtimestamptz, 'INFINITY'::jtimestamptz, '-Infinity'::jtimestamptz;
+ jtimestamptz | jtimestamptz | jtimestamptz | jtimestamptz 
+--------------+--------------+--------------+--------------
+ infinity     | -infinity    | infinity     | -infinity
+(1 row)
+
+-- historic offsets: a zone's local mean time, with seconds
+SET timezone = 'Asia/Manila';
+SELECT '1222-03-10 12:00:00+00'::jtimestamptz AS manila_in_1843;
+        manila_in_1843        
+------------------------------
+ 1222-03-09 20:03:52-15:56:08
+(1 row)
+
+SET timezone = 'Asia/Tehran';
+SELECT '0579-03-11 12:00:00+00'::jtimestamptz AS tehran_in_1200_ad;
+      tehran_in_1200_ad       
+------------------------------
+ 0579-03-11 15:25:44+03:25:44
+(1 row)
+
+SET timezone = 'UTC';
+-- now, today, tomorrow and yesterday follow the clock and the session zone
+SELECT left('now'::jtimestamptz::text, 10) = jdate_format(now(), false) AS now_date_matches;
+ now_date_matches 
+------------------
+ t
+(1 row)
+
+SELECT 'today'::jtimestamptz::text = jdate_format(now(), false) || ' 00:00:00+00' AS today_matches;
+ today_matches 
+---------------
+ t
+(1 row)
+
+SELECT 'tomorrow'::jtimestamptz::text
+       = jdate_format(now() + interval '1 day', false) || ' 00:00:00+00' AS tomorrow_matches;
+ tomorrow_matches 
+------------------
+ t
+(1 row)
+
+SELECT 'yesterday'::jtimestamptz::text
+       = jdate_format(now() - interval '1 day', false) || ' 00:00:00+00' AS yesterday_matches;
+ yesterday_matches 
+-------------------
+ t
+(1 row)
+
+SELECT 'NOW'::jtimestamptz::text = 'now'::jtimestamptz::text AS now_uppercase;
+ now_uppercase 
+---------------
+ t
+(1 row)
+
+SET timezone = 'Pacific/Kiritimati';
+SELECT 'today'::jtimestamptz::text = jdate_format(now(), false) || ' 00:00:00+14' AS today_matches_in_kiritimati;
+ today_matches_in_kiritimati 
+-----------------------------
+ t
+(1 row)
+
+SELECT left('now'::jtimestamptz::text, 10) = jdate_format(now(), false) AS now_date_matches_in_kiritimati;
+ now_date_matches_in_kiritimati 
+--------------------------------
+ t
+(1 row)
+
+SET timezone = 'UTC';
+-- ---------------------------------------------------------------------
+-- errors
+-- ---------------------------------------------------------------------
+\set VERBOSITY sqlstate
+-- 22007: no Jalali date, and not one of the special words
+SELECT 'allballs'::jtimestamptz;
+ERROR:  22007
+SELECT 'March 20, 2024 12:00+00'::jtimestamptz;
+ERROR:  22007
+SELECT '20240320'::jtimestamptz;
+ERROR:  22007
+SELECT '12:00:00+03:30'::jtimestamptz;
+ERROR:  22007
+SELECT 'garbage'::jtimestamptz;
+ERROR:  22007
+SELECT ''::jtimestamptz;
+ERROR:  22007
+SELECT ' now'::jtimestamptz;
+ERROR:  22007
+SELECT 'now '::jtimestamptz;
+ERROR:  22007
+SELECT 'nowhere'::jtimestamptz;
+ERROR:  22007
+SELECT '1403-05'::jtimestamptz;
+ERROR:  22007
+SELECT '1403-05-15x'::jtimestamptz;
+ERROR:  22007
+SELECT '1403-05-15 12:00+00 1403-05-16'::jtimestamptz;
+ERROR:  22007
+SELECT '1403-05-15 12:00+00 2024-03-21'::jtimestamptz;
+ERROR:  22007
+-- 22008: an invalid Jalali date, a time field out of range
+SELECT '1403-13-01 12:00'::jtimestamptz;
+ERROR:  22008
+SELECT '1404-12-30 12:00'::jtimestamptz;
+ERROR:  22008
+SELECT '1403-07-31 12:00'::jtimestamptz;
+ERROR:  22008
+SELECT '4294968699-01-01 12:00'::jtimestamptz;
+ERROR:  22008
+SELECT '1403-01-01 25:00'::jtimestamptz;
+ERROR:  22008
+SELECT '1403-01-01 12:60+00'::jtimestamptz;
+ERROR:  22008
+-- 22008: outside the range, also with a zone that would move it inside
+SELECT '-0062-12-29 23:59:59.999999+00'::jtimestamptz;
+ERROR:  22008
+SELECT '3178-01-01 00:00:00+00'::jtimestamptz;
+ERROR:  22008
+SELECT '-0061-01-01 00:00:00+00'::jtimestamptz;   -- inside the Jalali range, not the safe range
+ERROR:  22008
+SELECT '3177-12-29 23:59:59+00'::jtimestamptz;
+ERROR:  22008
+SELECT '-0061-01-01 00:00:00+15:59'::jtimestamptz;
+ERROR:  22008
+SELECT '1403-01-01 12:00 BC'::jtimestamptz;
+ERROR:  22008
+-- 22009: a zone offset out of range; 22023: an unknown zone
+SELECT '1403-01-01 12:00:00+16:00'::jtimestamptz;
+ERROR:  22009
+SELECT '1403-01-01 12:00:00-16:00'::jtimestamptz;
+ERROR:  22009
+SELECT '1403-01-01 12:00:00+17:00'::jtimestamptz;
+ERROR:  22009
+SELECT '1403-01-01 12:00 Nowhere/Zone'::jtimestamptz;
+ERROR:  22023
+\set VERBOSITY default
+-- the message names our type
+SELECT '1403-13-01 12:00'::jtimestamptz;
+ERROR:  date out of range for type jtimestamptz: "1403-13-01 12:00"
+LINE 1: SELECT '1403-13-01 12:00'::jtimestamptz;
+               ^
+SELECT 'March 20, 2024 12:00+00'::jtimestamptz;
+ERROR:  invalid input syntax for type jtimestamptz: "March 20, 2024 12:00+00"
+LINE 1: SELECT 'March 20, 2024 12:00+00'::jtimestamptz;
+               ^
+SELECT '1403-01-01 25:00'::jtimestamptz;
+ERROR:  date/time field value out of range for type jtimestamptz: "1403-01-01 25:00"
+LINE 1: SELECT '1403-01-01 25:00'::jtimestamptz;
+               ^
+SELECT '1403-01-01 12:00 Nowhere/Zone'::jtimestamptz;
+ERROR:  invalid input for type jtimestamptz: "1403-01-01 12:00 Nowhere/Zone"
+LINE 1: SELECT '1403-01-01 12:00 Nowhere/Zone'::jtimestamptz;
+               ^
+DETAIL:  time zone "nowhere/zone" not recognized
+-- ---------------------------------------------------------------------
+-- soft errors: pg_input_is_valid and pg_input_error_info (SQLSTATE only)
+-- ---------------------------------------------------------------------
+SELECT pg_input_is_valid('1403-05-15 12:00+03:30', 'jtimestamptz') AS valid,
+       pg_input_is_valid('1403-05-15 12:00 +15:59:59', 'jtimestamptz') AS largest_offset,
+       pg_input_is_valid('epoch', 'jtimestamptz') AS valid_epoch,
+       pg_input_is_valid('allballs', 'jtimestamptz') AS allballs,
+       pg_input_is_valid('1403-13-01 12:00', 'jtimestamptz') AS bad_date,
+       pg_input_is_valid('1403-01-01 25:00', 'jtimestamptz') AS bad_time,
+       pg_input_is_valid('3178-01-01', 'jtimestamptz') AS above_range,
+       pg_input_is_valid('-0061-01-01 00:00:00+00', 'jtimestamptz') AS below_safe_range,
+       pg_input_is_valid('1403-01-01 12:00 BC', 'jtimestamptz') AS bc;
+ valid | largest_offset | valid_epoch | allballs | bad_date | bad_time | above_range | below_safe_range | bc 
+-------+----------------+-------------+----------+----------+----------+-------------+------------------+----
+ t     | t              | t           | f        | f        | f        | f           | f                | f
+(1 row)
+
+SELECT s, (pg_input_error_info(s, 'jtimestamptz')).sql_error_code AS sqlstate
+FROM (VALUES ('garbage'), ('1403-05-15 12:00+00 1403-05-16'), ('1403-13-01 12:00'),
+             ('1403-01-01 25:00'), ('3178-01-01 00:00+00'), ('-0061-01-01 15:59:59.999999+00'),
+             ('1403-01-01 12:00 BC'), ('1403-01-01 12:00 Nowhere/Zone'),
+             ('1403-01-01 12:00+16:00'), ('1403-01-01 12:00+15:59:59')) v(s);
+               s                | sqlstate 
+--------------------------------+----------
+ garbage                        | 22007
+ 1403-05-15 12:00+00 1403-05-16 | 22007
+ 1403-13-01 12:00               | 22008
+ 1403-01-01 25:00               | 22008
+ 3178-01-01 00:00+00            | 22008
+ -0061-01-01 15:59:59.999999+00 | 22008
+ 1403-01-01 12:00 BC            | 22008
+ 1403-01-01 12:00 Nowhere/Zone  | 22023
+ 1403-01-01 12:00+16:00         | 22009
+ 1403-01-01 12:00+15:59:59      | 
+(10 rows)
+
+SELECT pg_input_is_valid('{"1403-01-01 12:00+03:30","1403-12-29 23:59:59Z"}', 'jtimestamptz[]') AS good_array,
+       pg_input_is_valid('{"1403-01-01 12:00+03:30","1403-01-01 25:00"}', 'jtimestamptz[]') AS bad_element,
+       pg_input_is_valid('{"1403-01-01 12:00+03:30","3178-01-01 00:00+00"}', 'jtimestamptz[]') AS range_element;
+ good_array | bad_element | range_element 
+------------+-------------+---------------
+ t          | f           | f
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- the range: first and last valid instant, and one microsecond beyond each,
+-- under UTC and under the zones 15:59 east and west of Greenwich. The range
+-- is checked on the instant, so a zone does not move it; what changes is
+-- the local text that spells the instant.
+-- ---------------------------------------------------------------------
+-- UTC: the first valid instant is 16 hours into the first day
+SET timezone = 'UTC';
+SELECT '-0061-01-01 16:00:00+00'::jtimestamptz AS first_valid;
+       first_valid       
+-------------------------
+ -0061-01-01 16:00:00+00
+(1 row)
+
+SELECT '3177-12-29 07:59:59.999999+00'::jtimestamptz AS last_valid;
+          last_valid           
+-------------------------------
+ 3177-12-29 07:59:59.999999+00
+(1 row)
+
+SELECT pg_input_is_valid('-0061-01-01 15:59:59.999999+00', 'jtimestamptz') AS one_microsecond_before_first,
+       pg_input_is_valid('-0061-01-01 16:00:00+00', 'jtimestamptz') AS first,
+       pg_input_is_valid('3177-12-29 07:59:59.999999+00', 'jtimestamptz') AS last,
+       pg_input_is_valid('3177-12-29 08:00:00+00', 'jtimestamptz') AS one_microsecond_after_last;
+ one_microsecond_before_first | first | last | one_microsecond_after_last 
+------------------------------+-------+------+----------------------------
+ f                            | t     | t    | f
+(1 row)
+
+SELECT (pg_input_error_info('-0061-01-01 15:59:59.999999+00', 'jtimestamptz')).sql_error_code AS below_sqlstate,
+       (pg_input_error_info('3177-12-29 08:00:00+00', 'jtimestamptz')).sql_error_code AS above_sqlstate;
+ below_sqlstate | above_sqlstate 
+----------------+----------------
+ 22008          | 22008
+(1 row)
+
+\set VERBOSITY sqlstate
+SELECT '-0061-01-01 15:59:59.999999+00'::jtimestamptz;
+ERROR:  22008
+SELECT '3177-12-29 08:00:00+00'::jtimestamptz;
+ERROR:  22008
+\set VERBOSITY default
+-- an explicit offset in the text moves the same instants
+SELECT pg_input_is_valid('-0061-01-01 16:00:00+00', 'jtimestamptz') AS first_utc,
+       pg_input_is_valid('-0061-01-02 07:59:00+15:59', 'jtimestamptz') AS first_written_at_plus_1559,
+       pg_input_is_valid('-0061-01-02 07:58:59.999999+15:59', 'jtimestamptz') AS before_first_at_plus_1559,
+       pg_input_is_valid('-0061-01-01 00:01:00-15:59', 'jtimestamptz') AS first_written_at_minus_1559,
+       pg_input_is_valid('-0061-01-01 00:00:59.999999-15:59', 'jtimestamptz') AS before_first_at_minus_1559;
+ first_utc | first_written_at_plus_1559 | before_first_at_plus_1559 | first_written_at_minus_1559 | before_first_at_minus_1559 
+-----------+----------------------------+---------------------------+-----------------------------+----------------------------
+ t         | t                          | f                         | t                           | f
+(1 row)
+
+-- session zone 15:59 east of Greenwich (POSIX spelling: the sign is inverted)
+SET timezone = '<+15:59>-15:59';
+SELECT '-0061-01-02 07:59:00'::jtimestamptz AS first_valid_plus_1559;
+   first_valid_plus_1559    
+----------------------------
+ -0061-01-02 07:59:00+15:59
+(1 row)
+
+SELECT '3177-12-29 23:58:59.999999'::jtimestamptz AS last_valid_plus_1559;
+       last_valid_plus_1559       
+----------------------------------
+ 3177-12-29 23:58:59.999999+15:59
+(1 row)
+
+SELECT pg_input_is_valid('-0061-01-02 07:58:59.999999', 'jtimestamptz') AS one_microsecond_before_first,
+       pg_input_is_valid('-0061-01-02 07:59:00', 'jtimestamptz') AS first,
+       pg_input_is_valid('3177-12-29 23:58:59.999999', 'jtimestamptz') AS last,
+       pg_input_is_valid('3177-12-29 23:59:00', 'jtimestamptz') AS one_microsecond_after_last;
+ one_microsecond_before_first | first | last | one_microsecond_after_last 
+------------------------------+-------+------+----------------------------
+ f                            | t     | t    | f
+(1 row)
+
+-- a valid instant shows a Jalali day in this zone too, at both edges
+SELECT '3177-12-29 07:59:59.999999+00'::jtimestamptz AS last_valid_shown_plus_1559;
+    last_valid_shown_plus_1559    
+----------------------------------
+ 3177-12-29 23:58:59.999999+15:59
+(1 row)
+
+SELECT '-0061-01-01 16:00:00+00'::jtimestamptz AS first_valid_shown_plus_1559;
+ first_valid_shown_plus_1559 
+-----------------------------
+ -0061-01-02 07:59:00+15:59
+(1 row)
+
+SELECT '1403-01-01 12:00:00+00'::jtimestamptz AS ordinary_shown_plus_1559;
+ ordinary_shown_plus_1559  
+---------------------------
+ 1403-01-02 03:59:00+15:59
+(1 row)
+
+-- session zone 15:59 west of Greenwich
+SET timezone = '<-15:59>+15:59';
+SELECT '-0061-01-01 00:01:00'::jtimestamptz AS first_valid_minus_1559;
+   first_valid_minus_1559   
+----------------------------
+ -0061-01-01 00:01:00-15:59
+(1 row)
+
+SELECT '3177-12-28 16:00:59.999999'::jtimestamptz AS last_valid_minus_1559;
+      last_valid_minus_1559       
+----------------------------------
+ 3177-12-28 16:00:59.999999-15:59
+(1 row)
+
+SELECT pg_input_is_valid('-0061-01-01 00:00:59.999999', 'jtimestamptz') AS one_microsecond_before_first,
+       pg_input_is_valid('-0061-01-01 00:01:00', 'jtimestamptz') AS first,
+       pg_input_is_valid('3177-12-28 16:00:59.999999', 'jtimestamptz') AS last,
+       pg_input_is_valid('3177-12-28 16:01:00', 'jtimestamptz') AS one_microsecond_after_last;
+ one_microsecond_before_first | first | last | one_microsecond_after_last 
+------------------------------+-------+------+----------------------------
+ f                            | t     | t    | f
+(1 row)
+
+SELECT '3177-12-29 07:59:59.999999+00'::jtimestamptz AS last_valid_shown_minus_1559;
+   last_valid_shown_minus_1559    
+----------------------------------
+ 3177-12-28 16:00:59.999999-15:59
+(1 row)
+
+SELECT '-0061-01-01 16:00:00+00'::jtimestamptz AS first_valid_shown_minus_1559;
+ first_valid_shown_minus_1559 
+------------------------------
+ -0061-01-01 00:01:00-15:59
+(1 row)
+
+SELECT '1403-01-01 12:00:00+00'::jtimestamptz AS ordinary_shown_minus_1559;
+ ordinary_shown_minus_1559 
+---------------------------
+ 1402-12-29 20:01:00-15:59
+(1 row)
+
+-- historic local mean time: before its first transition a zone keeps its earliest offset,
+-- which for the first valid instant (year 560) can be 15:56:08 west (Asia/Manila) or
+-- 15:13:42 east (America/Metlakatla) of Greenwich, with seconds
+SET timezone = 'Asia/Manila';
+SELECT '-0061-01-01 16:00:00+00'::jtimestamptz AS first_valid_manila;
+      first_valid_manila       
+-------------------------------
+ -0061-01-01 00:03:52-15:56:08
+(1 row)
+
+SET timezone = 'America/Metlakatla';
+SELECT '-0061-01-01 16:00:00+00'::jtimestamptz AS first_valid_metlakatla;
+    first_valid_metlakatla     
+-------------------------------
+ -0061-01-02 07:13:42+15:13:42
+(1 row)
+
+SET timezone = 'UTC';
+-- the extreme offsets PostgreSQL accepts in the text, +/-15:59:59: the edge instants again
+SELECT pg_input_is_valid('-0061-01-02 07:59:59+15:59:59', 'jtimestamptz') AS first_at_plus_155959,
+       pg_input_is_valid('-0061-01-02 07:59:58.999999+15:59:59', 'jtimestamptz') AS before_first_at_plus_155959,
+       pg_input_is_valid('3177-12-28 16:00:00.999999-15:59:59', 'jtimestamptz') AS last_at_minus_155959,
+       pg_input_is_valid('3177-12-28 16:00:01-15:59:59', 'jtimestamptz') AS after_last_at_minus_155959;
+ first_at_plus_155959 | before_first_at_plus_155959 | last_at_minus_155959 | after_last_at_minus_155959 
+----------------------+-----------------------------+----------------------+----------------------------
+ t                    | f                           | t                    | f
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- typmod: jtimestamptz(p), p = 0..6, applied by the input function (COPY, array
+-- input, pg_input_is_valid, a direct call); the scale cast that a cast or an
+-- INSERT of a non-literal goes through comes with the other casts.
+-- ---------------------------------------------------------------------
+SELECT format_type('jtimestamptz'::regtype, NULL) AS no_typmod,
+       format_type('jtimestamptz'::regtype, 0) AS p0,
+       format_type('jtimestamptz'::regtype, 3) AS p3,
+       format_type('jtimestamptz'::regtype, 6) AS p6;
+  no_typmod   |       p0        |       p3        |       p6        
+--------------+-----------------+-----------------+-----------------
+ jtimestamptz | jtimestamptz(0) | jtimestamptz(3) | jtimestamptz(6)
+(1 row)
+
+SELECT to_regtype('jtimestamptz(3)') = 'jtimestamptz'::regtype AS typmod_is_not_part_of_the_oid;
+ typmod_is_not_part_of_the_oid 
+-------------------------------
+ t
+(1 row)
+
+\set VERBOSITY sqlstate
+SELECT '1403-01-01 12:00:00'::jtimestamptz(7);
+WARNING:  22023
+      jtimestamptz      
+------------------------
+ 1403-01-01 12:00:00+00
+(1 row)
+
+SET client_min_messages = error;
+CREATE TABLE jt_io_tz_p7 (c jtimestamptz(7));
+RESET client_min_messages;
+SELECT atttypmod, format_type(atttypid, atttypmod) AS type
+FROM pg_attribute WHERE attrelid = 'jt_io_tz_p7'::regclass AND attname = 'c';
+ atttypmod |      type       
+-----------+-----------------
+         6 | jtimestamptz(6)
+(1 row)
+
+SELECT '1403-01-01 12:00:00'::jtimestamptz(-1);
+ERROR:  22023
+SELECT '1403-01-01 12:00:00'::jtimestamptz(1, 2);
+ERROR:  22023
+\set VERBOSITY default
+CREATE TABLE jt_io_tz_typmod (p0 jtimestamptz(0), p3 jtimestamptz(3), p6 jtimestamptz(6), pn jtimestamptz);
+SELECT attname, format_type(atttypid, atttypmod) AS type, atttypmod
+FROM pg_attribute WHERE attrelid = 'jt_io_tz_typmod'::regclass AND attnum > 0 ORDER BY attnum;
+ attname |      type       | atttypmod 
+---------+-----------------+-----------
+ p0      | jtimestamptz(0) |         0
+ p3      | jtimestamptz(3) |         3
+ p6      | jtimestamptz(6) |         6
+ pn      | jtimestamptz    |        -1
+(4 rows)
+
+COPY jt_io_tz_typmod FROM STDIN;
+SELECT * FROM jt_io_tz_typmod;
+           p0           |             p3             |              p6               |              pn               
+------------------------+----------------------------+-------------------------------+-------------------------------
+ 1403-01-01 12:00:01+00 | 1403-01-01 12:00:00.124+00 | 1403-01-01 12:00:00.123457+00 | 1403-01-01 12:00:00.123457+00
+ 1403-01-01 12:00:00+00 | 1403-01-01 12:00:00.123+00 | 1403-01-01 12:00:00.123456+00 | 1403-01-01 12:00:01+00
+ 1403-01-01 00:00:00+00 | 1403-01-01 00:00:00+00     | 1403-01-01 00:00:00+00        | 1403-01-01 00:00:00+00
+(3 rows)
+
+-- rounding to the typmod can carry past the last valid microsecond: 22008
+\set VERBOSITY sqlstate
+SELECT pg_input_is_valid('3177-12-29 07:59:59.4+00', 'jtimestamptz(0)') AS rounds_down_stays_valid,
+       pg_input_is_valid('3177-12-29 07:59:59.5+00', 'jtimestamptz(0)') AS rounds_up_out_of_range,
+       pg_input_is_valid('3177-12-29 07:59:59.9996+00', 'jtimestamptz(3)') AS rounds_up_p3,
+       pg_input_is_valid('3177-12-29 07:59:59.999999+00', 'jtimestamptz(6)') AS p6_stays_valid;
+ rounds_down_stays_valid | rounds_up_out_of_range | rounds_up_p3 | p6_stays_valid 
+-------------------------+------------------------+--------------+----------------
+ t                       | f                      | f            | t
+(1 row)
+
+SELECT (pg_input_error_info('3177-12-29 07:59:59.5+00', 'jtimestamptz(0)')).sql_error_code AS sqlstate;
+ sqlstate 
+----------
+ 22008
+(1 row)
+
+CREATE TABLE jt_io_tz_edge (p0 jtimestamptz(0));
+COPY jt_io_tz_edge FROM STDIN;
+ERROR:  22008
+SELECT count(*) AS rows_after_rounding_past_the_edge FROM jt_io_tz_edge;
+ rows_after_rounding_past_the_edge 
+-----------------------------------
+                                 0
+(1 row)
+
+\set VERBOSITY default
+-- ---------------------------------------------------------------------
+-- DateStyle does not change the text, in or out
+-- ---------------------------------------------------------------------
+DO $do$
+DECLARE s text;
+BEGIN
+  FOREACH s IN ARRAY ARRAY['ISO, YMD', 'ISO, DMY', 'ISO, MDY', 'SQL, DMY', 'SQL, MDY',
+                           'German', 'Postgres, DMY', 'Postgres, MDY']
+  LOOP
+    PERFORM set_config('DateStyle', s, false);
+    RAISE INFO '%: % and %', s, '1403-05-02 12:34:56.5+03:30'::jtimestamptz,
+               '1403-02-05 01:02:03+00'::jtimestamptz;
+  END LOOP;
+  PERFORM set_config('DateStyle', 'ISO, YMD', false);
+END
+$do$;
+INFO:  ISO, YMD: 1403-05-02 09:04:56.5+00 and 1403-02-05 01:02:03+00
+INFO:  ISO, DMY: 1403-05-02 09:04:56.5+00 and 1403-02-05 01:02:03+00
+INFO:  ISO, MDY: 1403-05-02 09:04:56.5+00 and 1403-02-05 01:02:03+00
+INFO:  SQL, DMY: 1403-05-02 09:04:56.5+00 and 1403-02-05 01:02:03+00
+INFO:  SQL, MDY: 1403-05-02 09:04:56.5+00 and 1403-02-05 01:02:03+00
+INFO:  German: 1403-05-02 09:04:56.5+00 and 1403-02-05 01:02:03+00
+INFO:  Postgres, DMY: 1403-05-02 09:04:56.5+00 and 1403-02-05 01:02:03+00
+INFO:  Postgres, MDY: 1403-05-02 09:04:56.5+00 and 1403-02-05 01:02:03+00
+SET DateStyle = 'German';
+SELECT '1403-05-02 12:34:56+00'::jtimestamptz, '1403-02-05 01:02:03+00'::jtimestamptz;
+      jtimestamptz      |      jtimestamptz      
+------------------------+------------------------
+ 1403-05-02 12:34:56+00 | 1403-02-05 01:02:03+00
+(1 row)
+
+SET DateStyle = 'Postgres, MDY';
+SELECT '1403-05-02 12:34:56+00'::jtimestamptz, '1403-02-05 01:02:03+00'::jtimestamptz;
+      jtimestamptz      |      jtimestamptz      
+------------------------+------------------------
+ 1403-05-02 12:34:56+00 | 1403-02-05 01:02:03+00
+(1 row)
+
+SET DateStyle = 'SQL, DMY';
+SELECT '1403-05-02 12:34:56+00'::jtimestamptz, 'infinity'::jtimestamptz;
+      jtimestamptz      | jtimestamptz 
+------------------------+--------------
+ 1403-05-02 12:34:56+00 | infinity
+(1 row)
+
+SET DateStyle = 'ISO, YMD';
+-- ---------------------------------------------------------------------
+-- arrays
+-- ---------------------------------------------------------------------
+SELECT ARRAY['1403-01-01 10:00+03:30', '1403-12-29 23:59:59.5+00']::jtimestamptz[] AS arr;
+                          arr                          
+-------------------------------------------------------
+ {"1403-01-01 06:30:00+00","1403-12-29 23:59:59.5+00"}
+(1 row)
+
+SELECT '{"1403-01-01 10:00:00+00", NULL, "1403-12-29T23:59:59.5+03:30", infinity}'::jtimestamptz[] AS arr_literal;
+                             arr_literal                             
+---------------------------------------------------------------------
+ {"1403-01-01 10:00:00+00",NULL,"1403-12-29 20:29:59.5+00",infinity}
+(1 row)
+
+SELECT ('{"1403-01-01 10:00:00+00","1403-12-29 23:59:59.5+00"}'::jtimestamptz[])[2] AS second_element;
+      second_element      
+--------------------------
+ 1403-12-29 23:59:59.5+00
+(1 row)
+
+SELECT pg_typeof(ARRAY['1403-01-01 10:00+00']::jtimestamptz[]) AS array_type;
+   array_type   
+----------------
+ jtimestamptz[]
+(1 row)
+
+\set VERBOSITY sqlstate
+SELECT '{"1403-01-01 10:00:00+00","3178-01-01 00:00:00+00"}'::jtimestamptz[];
+ERROR:  22008
+SELECT '{"1403-01-01 10:00:00+00","-0061-01-01 00:00:00+00"}'::jtimestamptz[];
+ERROR:  22008
+SELECT '{"1403-01-01 10:00:00+00","garbage"}'::jtimestamptz[];
+ERROR:  22007
+\set VERBOSITY default
+-- ---------------------------------------------------------------------
+-- the type in the catalog
+-- ---------------------------------------------------------------------
+SELECT typname, typlen, typbyval, typalign, typstorage, typcategory, typispreferred,
+       typtype, typdelim, typinput::regproc AS input, typoutput::regproc AS output,
+       typreceive::regproc AS receive, typsend::regproc AS send,
+       typmodin::regproc AS typmodin, typmodout::regproc AS typmodout,
+       typarray::regtype AS array_type
+FROM pg_type WHERE typname = 'jtimestamptz';
+   typname    | typlen | typbyval | typalign | typstorage | typcategory | typispreferred | typtype | typdelim |      input      |      output      |      receive      |       send        |      typmodin       |       typmodout        |   array_type   
+--------------+--------+----------+----------+------------+-------------+----------------+---------+----------+-----------------+------------------+-------------------+-------------------+---------------------+------------------------+----------------
+ jtimestamptz |      8 | t        | d        | p          | D           | f              | b       | ,        | jtimestamptz_in | jtimestamptz_out | jtimestamptz_recv | jtimestamptz_send | timestamptztypmodin | jtimestamptz_typmodout | jtimestamptz[]
+(1 row)
+
+-- the same layout as core's timestamptz, apart from the OIDs and function names
+SELECT a.typlen = b.typlen AND a.typbyval = b.typbyval AND a.typalign = b.typalign
+       AND a.typstorage = b.typstorage AND a.typcategory = b.typcategory AS same_layout_as_timestamptz,
+       a.typispreferred AS jtimestamptz_preferred, b.typispreferred AS timestamptz_preferred
+FROM pg_type a, pg_type b WHERE a.typname = 'jtimestamptz' AND b.typname = 'timestamptz';
+ same_layout_as_timestamptz | jtimestamptz_preferred | timestamptz_preferred 
+----------------------------+------------------------+-----------------------
+ t                          | f                      | t
+(1 row)
+
+SELECT typname, typelem::regtype AS element_type FROM pg_type WHERE typname = '_jtimestamptz';
+    typname    | element_type 
+---------------+--------------
+ _jtimestamptz | jtimestamptz
+(1 row)
+
+-- volatility: input and output STABLE (zone, clock), the rest IMMUTABLE; all strict and parallel safe
+SELECT proname, provolatile, proisstrict, proparallel, prorettype::regtype AS returns
+FROM pg_proc
+WHERE proname IN ('jtimestamptz_in', 'jtimestamptz_out', 'jtimestamptz_recv', 'jtimestamptz_send',
+                  'jtimestamptz_typmodout', 'to_jtimestamptz')
+ORDER BY proname;
+        proname         | provolatile | proisstrict | proparallel |   returns    
+------------------------+-------------+-------------+-------------+--------------
+ jtimestamptz_in        | s           | t           | s           | jtimestamptz
+ jtimestamptz_out       | s           | t           | s           | cstring
+ jtimestamptz_recv      | i           | t           | s           | jtimestamptz
+ jtimestamptz_send      | i           | t           | s           | bytea
+ jtimestamptz_typmodout | i           | t           | s           | cstring
+ to_jtimestamptz        | i           | t           | s           | jtimestamptz
+(6 rows)
+
+-- jtimestamptz_typmodout prints "(p)" like the jtimestamp one
+SELECT jtimestamptz_typmodout(3) AS p3, jtimestamptz_typmodout(-1) AS none;
+ p3  | none 
+-----+------
+ (3) | 
+(1 row)
+
+-- so neither the text cast nor the text conversion can be used in an index; to_jtimestamptz
+-- is IMMUTABLE and can (there is no operator class for the type yet, so index its bytea send form)
+CREATE TABLE jt_io_tz_idx (s text, j jtimestamptz, e double precision);
+\set VERBOSITY sqlstate
+CREATE INDEX jt_io_tz_idx_from_text ON jt_io_tz_idx ((jtimestamptz_send(s::jtimestamptz)));
+ERROR:  42P17
+CREATE INDEX jt_io_tz_idx_to_text ON jt_io_tz_idx ((j::text));
+ERROR:  42P17
+\set VERBOSITY default
+CREATE INDEX jt_io_tz_idx_epoch ON jt_io_tz_idx ((jtimestamptz_send(to_jtimestamptz(e))));
+SELECT indexname FROM pg_indexes WHERE tablename = 'jt_io_tz_idx' ORDER BY indexname;
+     indexname      
+--------------------
+ jt_io_tz_idx_epoch
+(1 row)
+
+SELECT obj_description('jtimestamptz'::regtype, 'pg_type') IS NOT NULL AS has_comment;
+ has_comment 
+-------------
+ t
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- binary: send is core's timestamptz wire format, recv checks the safe range
+-- ---------------------------------------------------------------------
+SET timezone = 'UTC';
+CREATE TABLE jt_io_tz_vals (t jtimestamptz);
+INSERT INTO jt_io_tz_vals VALUES
+    ('1403-01-01 00:00:00+00'), ('-0061-01-01 16:00:00+00'), ('3177-12-29 07:59:59.999999+00'),
+    ('1348-10-11 00:00:00+00'), ('infinity'), ('-infinity');
+-- the same eight bytes as core's timestamptz of the same instant
+SELECT j, g, encode(jtimestamptz_send(j::jtimestamptz), 'hex') AS wire,
+       jtimestamptz_send(j::jtimestamptz) = timestamptz_send(g::timestamptz) AS same_as_timestamptz
+FROM (VALUES ('1403-01-01 00:00:00+00', '2024-03-20 00:00:00+00'),
+             ('-0061-01-01 16:00:00+00', '0560-03-20 16:00:00+00'),
+             ('3177-12-29 07:59:59.999999+00', '3799-03-19 07:59:59.999999+00'),
+             ('1348-10-11 00:00:00+00', '1970-01-01 00:00:00+00'),
+             ('1403-01-01 12:00:00+03:30', '2024-03-20 08:30:00+00')) v(j, g)
+ORDER BY j COLLATE "C";
+               j               |               g               |       wire       | same_as_timestamptz 
+-------------------------------+-------------------------------+------------------+---------------------
+ -0061-01-01 16:00:00+00       | 0560-03-20 16:00:00+00        | ff5e950200470000 | t
+ 1348-10-11 00:00:00+00        | 1970-01-01 00:00:00+00        | fffca2fec4c82000 | t
+ 1403-01-01 00:00:00+00        | 2024-03-20 00:00:00+00        | 0002b70b0a5fe000 | t
+ 1403-01-01 12:00:00+03:30     | 2024-03-20 08:30:00+00        | 0002b7122a46d200 | t
+ 3177-12-29 07:59:59.999999+00 | 3799-03-19 07:59:59.999999+00 | 00c9b704feb6ffff | t
+(5 rows)
+
+SELECT t, encode(jtimestamptz_send(t), 'hex') AS wire,
+       jtimestamptz_send(t) = timestamptz_send(g::timestamptz) AS same_as_timestamptz
+FROM jt_io_tz_vals JOIN (VALUES ('infinity', 'infinity'), ('-infinity', '-infinity')) v(j, g)
+  ON t::text = j
+ORDER BY t::text COLLATE "C";
+     t     |       wire       | same_as_timestamptz 
+-----------+------------------+---------------------
+ -infinity | 8000000000000000 | t
+ infinity  | 7fffffffffffffff | t
+(2 rows)
+
+-- the wire format does not depend on the session zone
+SET timezone = 'Asia/Tehran';
+SELECT jtimestamptz_send('1403-01-01 12:00:00+00'::jtimestamptz) = timestamptz_send('2024-03-20 12:00:00+00'::timestamptz) AS same_in_tehran;
+ same_in_tehran 
+----------------
+ t
+(1 row)
+
+SET timezone = 'UTC';
+\copy jt_io_tz_vals TO 'test/results/jt_io_tz_vals.bin' WITH (FORMAT binary)
+CREATE TABLE jt_io_tz_back (t jtimestamptz);
+\copy jt_io_tz_back FROM 'test/results/jt_io_tz_vals.bin' WITH (FORMAT binary)
+SELECT t FROM jt_io_tz_back ORDER BY t::text COLLATE "C";
+               t               
+-------------------------------
+ -0061-01-01 16:00:00+00
+ -infinity
+ 1348-10-11 00:00:00+00
+ 1403-01-01 00:00:00+00
+ 3177-12-29 07:59:59.999999+00
+ infinity
+(6 rows)
+
+SELECT (SELECT array_agg(t::text ORDER BY t::text COLLATE "C") FROM jt_io_tz_vals)
+     = (SELECT array_agg(t::text ORDER BY t::text COLLATE "C") FROM jt_io_tz_back) AS roundtrip_equal;
+ roundtrip_equal 
+-----------------
+ t
+(1 row)
+
+-- recv: a timestamptz that core accepts but the safe range does not (22008, nothing loaded)
+CREATE TABLE jt_io_tz_core (t timestamptz);
+CREATE TABLE jt_io_tz_target (t jtimestamptz);
+CREATE TABLE jt_io_tz_target0 (t jtimestamptz(0));
+\set VERBOSITY sqlstate
+-- one microsecond below the first valid instant (0560-03-20 16:00 UTC)
+INSERT INTO jt_io_tz_core VALUES ('0560-03-20 15:59:59.999999+00');
+\copy jt_io_tz_core TO 'test/results/jt_io_tz_bad.bin' WITH (FORMAT binary)
+\copy jt_io_tz_target FROM 'test/results/jt_io_tz_bad.bin' WITH (FORMAT binary)
+ERROR:  22008
+SELECT count(*) AS rows_after_below_min FROM jt_io_tz_target;
+ rows_after_below_min 
+----------------------
+                    0
+(1 row)
+
+-- the first instant of the first Jalali day: valid for jtimestamp, not for jtimestamptz
+TRUNCATE jt_io_tz_core;
+INSERT INTO jt_io_tz_core VALUES ('0560-03-20 00:00:00+00');
+\copy jt_io_tz_core TO 'test/results/jt_io_tz_bad.bin' WITH (FORMAT binary)
+\copy jt_io_tz_target FROM 'test/results/jt_io_tz_bad.bin' WITH (FORMAT binary)
+ERROR:  22008
+SELECT count(*) AS rows_after_first_instant_of_first_day FROM jt_io_tz_target;
+ rows_after_first_instant_of_first_day 
+---------------------------------------
+                                     0
+(1 row)
+
+-- the first instant after the last valid one (3799-03-19 07:59:59.999999 UTC is the last)
+TRUNCATE jt_io_tz_core;
+INSERT INTO jt_io_tz_core VALUES ('3799-03-19 08:00:00+00');
+\copy jt_io_tz_core TO 'test/results/jt_io_tz_bad.bin' WITH (FORMAT binary)
+\copy jt_io_tz_target FROM 'test/results/jt_io_tz_bad.bin' WITH (FORMAT binary)
+ERROR:  22008
+SELECT count(*) AS rows_after_above_max FROM jt_io_tz_target;
+ rows_after_above_max 
+----------------------
+                    0
+(1 row)
+
+-- far outside core's own range is core's error, also 22008
+TRUNCATE jt_io_tz_core;
+INSERT INTO jt_io_tz_core VALUES ('0001-01-01 00:00:00+00 BC');
+\copy jt_io_tz_core TO 'test/results/jt_io_tz_bad.bin' WITH (FORMAT binary)
+\copy jt_io_tz_target FROM 'test/results/jt_io_tz_bad.bin' WITH (FORMAT binary)
+ERROR:  22008
+SELECT count(*) AS rows_after_bc FROM jt_io_tz_target;
+ rows_after_bc 
+---------------
+             0
+(1 row)
+
+-- the typmod of the column is applied on receive, and the check comes after it
+TRUNCATE jt_io_tz_core;
+INSERT INTO jt_io_tz_core VALUES ('3799-03-19 07:59:59.5+00');
+\copy jt_io_tz_core TO 'test/results/jt_io_tz_bad.bin' WITH (FORMAT binary)
+\copy jt_io_tz_target0 FROM 'test/results/jt_io_tz_bad.bin' WITH (FORMAT binary)
+ERROR:  22008
+SELECT count(*) AS rows_after_rounding_past_the_edge FROM jt_io_tz_target0;
+ rows_after_rounding_past_the_edge 
+-----------------------------------
+                                 0
+(1 row)
+
+\copy jt_io_tz_target FROM 'test/results/jt_io_tz_bad.bin' WITH (FORMAT binary)
+SELECT t FROM jt_io_tz_target;
+            t             
+--------------------------
+ 3177-12-29 07:59:59.5+00
+(1 row)
+
+\set VERBOSITY default
+-- ---------------------------------------------------------------------
+-- to_jtimestamptz(double precision): the instant of a Unix timestamp
+-- ---------------------------------------------------------------------
+SELECT pg_typeof(to_jtimestamptz(0)) AS type;
+     type     
+--------------
+ jtimestamptz
+(1 row)
+
+SET timezone = 'UTC';
+SELECT to_jtimestamptz(0) AS epoch_utc, to_jtimestamptz(1710000000.5) AS with_fraction,
+       to_jtimestamptz(-1) AS one_second_before_epoch;
+       epoch_utc        |      with_fraction       | one_second_before_epoch 
+------------------------+--------------------------+-------------------------
+ 1348-10-11 00:00:00+00 | 1402-12-19 16:00:00.5+00 | 1348-10-10 23:59:59+00
+(1 row)
+
+SET timezone = 'Asia/Tehran';
+SELECT to_jtimestamptz(0) AS epoch_tehran, to_jtimestamptz(1710000000.5) AS with_fraction;
+       epoch_tehran        |        with_fraction        
+---------------------------+-----------------------------
+ 1348-10-11 03:30:00+03:30 | 1402-12-19 19:30:00.5+03:30
+(1 row)
+
+SET timezone = 'UTC';
+-- the same bytes as core's to_timestamp, so the same rounding to microseconds
+SELECT x, jtimestamptz_send(to_jtimestamptz(x)) = timestamptz_send(to_timestamp(x)) AS same_as_to_timestamp
+FROM (VALUES (0::float8), (1710000000.5), (1710000000.1234567), (-1.5), (-0.0000006), (1403.6),
+             (-11676096000.25), (4102444800)) v(x);
+         x          | same_as_to_timestamp 
+--------------------+----------------------
+                  0 | t
+       1710000000.5 | t
+ 1710000000.1234567 | t
+               -1.5 | t
+             -6e-07 | t
+             1403.6 | t
+    -11676096000.25 | t
+         4102444800 | t
+(8 rows)
+
+-- infinities
+SELECT to_jtimestamptz('infinity') AS plus_infinity, to_jtimestamptz('-infinity') AS minus_infinity;
+ plus_infinity | minus_infinity 
+---------------+----------------
+ infinity      | -infinity
+(1 row)
+
+-- IMMUTABLE: the session zone does not change the instant
+SET timezone = 'UTC';
+SELECT jtimestamptz_send(to_jtimestamptz(1710000000)) AS wire_utc \gset
+SET timezone = 'Pacific/Kiritimati';
+SELECT jtimestamptz_send(to_jtimestamptz(1710000000)) = :'wire_utc'::bytea AS same_in_kiritimati;
+ same_in_kiritimati 
+--------------------
+ t
+(1 row)
+
+SET timezone = 'UTC';
+-- the edges: first and last valid instants (epoch of 0560-03-20 16:00 UTC and 3799-03-19 07:59:59 UTC)
+SELECT to_jtimestamptz(-44488425600) AS first_valid;
+       first_valid       
+-------------------------
+ -0061-01-01 16:00:00+00
+(1 row)
+
+SELECT to_jtimestamptz(57724387199) AS last_whole_second, to_jtimestamptz(57724387199.5) AS last_half_second;
+   last_whole_second    |     last_half_second     
+------------------------+--------------------------
+ 3177-12-29 07:59:59+00 | 3177-12-29 07:59:59.5+00
+(1 row)
+
+\set VERBOSITY sqlstate
+SELECT to_jtimestamptz(-44488425601);     -- one second below the first valid instant
+ERROR:  22008
+SELECT to_jtimestamptz(-44488425600.5);   -- half a second below
+ERROR:  22008
+SELECT to_jtimestamptz(57724387200);      -- the first instant above the last
+ERROR:  22008
+SELECT to_jtimestamptz(-44488483200);     -- the first instant of the first day: in to_jdate's range, not in the safe range
+ERROR:  22008
+SELECT to_jtimestamptz(57724444800);      -- the first instant after the last day
+ERROR:  22008
+SELECT to_jtimestamptz('NaN');
+ERROR:  22008
+SELECT to_jtimestamptz(1e18);
+ERROR:  22008
+SELECT to_jtimestamptz(-1e18);
+ERROR:  22008
+SELECT to_jtimestamptz(1e300);
+ERROR:  22008
+\set VERBOSITY default
+-- the same inputs are errors for to_jdate (or valid, where the safe range is the only difference)
+SELECT to_jdate(-44488483200) AS to_jdate_first_instant, to_jdate(57724444800 - 1) AS to_jdate_last_instant;
+ to_jdate_first_instant | to_jdate_last_instant 
+------------------------+-----------------------
+ -0061-01-01            | 3177-12-29
+(1 row)
+
+\set VERBOSITY sqlstate
+SELECT to_jdate('NaN');
+ERROR:  22008
+\set VERBOSITY default
+-- a jtimestamptz from an epoch reads back to the same instant
+SELECT x, to_jtimestamptz(x)::text::jtimestamptz::text = to_jtimestamptz(x)::text AS reads_back
+FROM (VALUES (0::float8), (1710000000.5), (-44488425600), (57724387199.5)) v(x);
+       x       | reads_back 
+---------------+------------
+             0 | t
+  1710000000.5 | t
+  -44488425600 | t
+ 57724387199.5 | t
+(4 rows)
+
 -- ---------------------------------------------------------------------
 -- clean up: extension_schema drops the extension, which needs no column of
 -- its types left behind
 -- ---------------------------------------------------------------------
 DROP TABLE jt_io_typmod, jt_io_edge, jt_io_p7, jt_io_idx, jt_io_vals, jt_io_back,
            jt_io_core, jt_io_target, jt_io_target0;
+DROP TABLE jt_io_tz_typmod, jt_io_tz_edge, jt_io_tz_p7, jt_io_tz_idx, jt_io_tz_vals,
+           jt_io_tz_back, jt_io_tz_core, jt_io_tz_target, jt_io_tz_target0;

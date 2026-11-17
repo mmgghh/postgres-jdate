@@ -85,6 +85,49 @@ jtimestamp_check_range(Timestamp value)
 		jdate_range_error();
 }
 
+/*
+ * jtimestamptz: the same Jalali range, shrunk at both ends by the largest zone
+ * displacement (TZDISP_LIMIT, 16 hours: offsets reach +/-15:59:59). An instant
+ * is displayed in the session zone, so only instants at least that far inside
+ * the range are guaranteed to show a Jalali day in every zone. The safe range
+ * is [first day start + 16h, day after the last day start - 16h), plus both
+ * infinities. It needs no zone, so the check is the same for every session.
+ */
+static inline bool
+jtimestamptz_in_range(TimestampTz value)
+{
+	if (TIMESTAMP_NOT_FINITE(value))
+		return true;
+
+	return value >= ((int64) jalaali_min_jdn() - POSTGRES_EPOCH_JDATE) * USECS_PER_DAY
+		+ (int64) TZDISP_LIMIT * USECS_PER_SEC &&
+		value < ((int64) jalaali_max_jdn() + 1 - POSTGRES_EPOCH_JDATE) * USECS_PER_DAY
+		- (int64) TZDISP_LIMIT * USECS_PER_SEC;
+}
+
+/* Raise 22008 unless the jtimestamptz is within the safe range. */
+static inline void
+jtimestamptz_check_range(TimestampTz value)
+{
+	if (!jtimestamptz_in_range(value))
+		jdate_range_error();
+}
+
+/*
+ * Whether a Unix epoch (seconds, double) lies within the days of the Jalali
+ * range: from the first instant of the first day to just before the first
+ * instant after the last. The bounds are exact doubles (multiples of 86400,
+ * far below 2^53). The test is written so that NaN fails it; callers deal with
+ * +/-Infinity before they ask. Shared by every to_j* function that takes an
+ * epoch, so they reject the same inputs.
+ */
+static inline bool
+jdate_epoch_in_range(float8 epoch)
+{
+	return epoch >= (double) (jalaali_min_jdn() - UNIX_EPOCH_JDATE) * SECS_PER_DAY &&
+		epoch < (double) (jalaali_max_jdn() - UNIX_EPOCH_JDATE + 1) * SECS_PER_DAY;
+}
+
 /* ---------------------------------------------------------------------
  * Text and calendar pieces
  * ------------------------------------------------------------------- */

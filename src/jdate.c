@@ -448,19 +448,6 @@ timestamptz_jdate(PG_FUNCTION_ARGS)
  * Validate a finite epoch and floor it to whole seconds. Shared by both
  * to_jdate variants so they reject exactly the same inputs.
  */
-static bool
-jdate_epoch_in_range(float8 epoch)
-{
-	/*
-	 * The bounds are the epochs of the first instant of the first supported
-	 * day and of the first instant after the last one: exact doubles
-	 * (multiples of 86400, far below 2^53). The test is written negated so
-	 * that NaN fails it too.
-	 */
-	return epoch >= (double) (jalaali_min_jdn() - UNIX_EPOCH_JDATE) * SECS_PER_DAY &&
-		epoch < (double) (jalaali_max_jdn() - UNIX_EPOCH_JDATE + 1) * SECS_PER_DAY;
-}
-
 static int64
 jdate_epoch_secs(float8 epoch)
 {

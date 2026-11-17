@@ -351,3 +351,78 @@ CREATE TYPE jtimestamp (
 );
 
 COMMENT ON TYPE jtimestamp IS 'Jalali (Persian) timestamp without time zone, 8 bytes, binary-compatible with timestamp';
+
+-- ============================================================
+-- jtimestamptz: timestamp with time zone, Jalali text I/O
+-- ============================================================
+--
+-- jtimestamptz has exactly the representation of core's timestamptz (int64
+-- microseconds since 2000-01-01 00:00:00 UTC, infinities at the int64
+-- extremes); only the text differs. Input is a Jalali date followed by
+-- whatever core's timestamptz parser takes ('1403-01-01 12:30+03:30',
+-- '1403-01-01T12:30Z', '1403-01-01 12:30 Asia/Tehran', ...; no zone means the
+-- session TimeZone), or one of the special words infinity, -infinity, now,
+-- today, tomorrow, yesterday, epoch. Output is the instant in the session
+-- time zone as ISO text with a Jalali date and a numeric offset (+HH, +HH:MM
+-- or +HH:MM:SS); DateStyle is ignored.
+--
+-- The valid range is the Jalali range shrunk by 16 hours at both ends:
+-- instants from -0061-01-01 00:00:00 UTC + 16h up to, not including, the start
+-- of 3178-01-01 UTC - 16h, and both infinities. Zone offsets reach
+-- +/-15:59:59, so every stored instant shows a Jalali day in every time
+-- zone, and the check needs no zone.
+
+CREATE TYPE jtimestamptz;
+
+-- STABLE, like core's timestamptz_in and for the same reasons as jtimestamp_in:
+-- the special words, and the session TimeZone when the text has no zone.
+CREATE FUNCTION jtimestamptz_in(cstring, oid, integer) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jtimestamptz_in'
+    LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+-- STABLE: the text depends on the session TimeZone (as core's timestamptz_out),
+-- which also makes jtimestamptz::text STABLE.
+CREATE FUNCTION jtimestamptz_out(jtimestamptz) RETURNS cstring
+    AS 'MODULE_PATHNAME', 'jtimestamptz_out'
+    LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION jtimestamptz_recv(internal, oid, integer) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jtimestamptz_recv'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION jtimestamptz_send(jtimestamptz) RETURNS bytea
+    AS 'MODULE_PATHNAME', 'jtimestamptz_send'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- Core's timestamptztypmodin is the type modifier input (jtimestamptz(p), p
+-- 0..6). The type modifier prints as "(p)": the same C function as
+-- jtimestamp_typmodout, under its own SQL name.
+CREATE FUNCTION jtimestamptz_typmodout(integer) RETURNS cstring
+    AS 'MODULE_PATHNAME', 'jtimestamp_typmodout'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE jtimestamptz (
+    INPUT = jtimestamptz_in,
+    OUTPUT = jtimestamptz_out,
+    RECEIVE = jtimestamptz_recv,
+    SEND = jtimestamptz_send,
+    TYPMOD_IN = timestamptztypmodin,
+    TYPMOD_OUT = jtimestamptz_typmodout,
+    INTERNALLENGTH = 8,
+    PASSEDBYVALUE,
+    ALIGNMENT = double,
+    STORAGE = plain,
+    CATEGORY = 'D',
+    PREFERRED = false
+);
+
+COMMENT ON TYPE jtimestamptz IS 'Jalali (Persian) timestamp with time zone, 8 bytes, binary-compatible with timestamptz';
+
+-- to_jtimestamptz(double precision): the instant of a Unix timestamp, like core's
+-- to_timestamp(double precision) but of this type, and like to_jdate it is pure
+-- arithmetic on the epoch: the session TimeZone is irrelevant, so it is
+-- IMMUTABLE. +/-Infinity give the infinities; NaN, an epoch outside the days of
+-- the Jalali range and an instant outside the safe range are SQLSTATE 22008.
+CREATE FUNCTION to_jtimestamptz(double precision) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jtimestamptz_from_epoch'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
