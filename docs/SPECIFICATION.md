@@ -359,8 +359,8 @@ ordering operators use the `scalar*sel` estimators. `min`/`max` declare
 
 As declared in `jdate--1.0.sql` (and checked against `pg_proc`): all 29
 functions are `STRICT` and `PARALLEL SAFE`, and the two aggregates are
-`PARALLEL = SAFE` with a combine function. 26 functions are `IMMUTABLE`; the three that depend on the
-session `TimeZone` are `STABLE`: `jdate(timestamptz)`, `timestamptz(jdate)`
+`PARALLEL = SAFE` with a combine function. 26 functions are `IMMUTABLE`; the
+three that depend on the session `TimeZone` are `STABLE`: `jdate(timestamptz)`, `timestamptz(jdate)`
 and `jdate_format(timestamptz, boolean)`. In particular `to_jdate` is
 `IMMUTABLE` (it is indexable), as are `jdate_part`, `extract(text, jdate)` and
 `jdate_trunc`.
