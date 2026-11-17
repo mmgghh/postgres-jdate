@@ -143,11 +143,12 @@ SELECT count(*) FILTER (WHERE gy NOT IN (jy + 621, jy + 622)) AS gregorian_year_
        count(*) FILTER (WHERE jm >= 11 AND gy <> jy + 622) AS after_new_year_violations
 FROM fullrange_days;
 
--- (e) the calendar-agnostic fields agree with core on the same day, and the
+-- (e) the calendar-agnostic fields agree with core on the same day (dow
+-- shifted to a Saturday start: (core dow + 1) % 7), and the
 -- Jalali fields agree with the text. dow and epoch run on every day; isodow
 -- is sampled (every 5th day, coprime to 7 so every weekday is hit) to keep
 -- the runtime down, since dow already covers every day.
-SELECT count(*) FILTER (WHERE jdate_part('dow', d) <> date_part('dow', dt)) AS dow_violations,
+SELECT count(*) FILTER (WHERE jdate_part('dow', d) <> (date_part('dow', dt)::int + 1) % 7) AS dow_violations,
        count(*) FILTER (WHERE g % 5 = 0
                         AND jdate_part('isodow', d) <> date_part('isodow', dt)) AS isodow_violations,
        count(*) FILTER (WHERE jdate_part('epoch', d) <> date_part('epoch', dt)) AS epoch_violations

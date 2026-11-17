@@ -128,9 +128,11 @@ SELECT jdate_trunc('month', '1403-05-15'::jdate);   -- 1403-05-01
 -- first year of the decade
 SELECT jdate_part('decade', '1403-05-15'::jdate);   -- 140
 
--- dow (0 = Sunday), isodow (1 = Monday .. 7 = Sunday) and epoch do not depend
--- on the calendar, so they equal core's answer for the same day
-SELECT jdate_part('dow', '1403-01-01'::jdate);      -- 3
+-- dow starts the week on Saturday (0 = Saturday .. 6 = Friday); dow + 1 is the
+-- 1-based Saturday-first number. isodow is the ISO 8601 one (1 = Monday ..
+-- 7 = Sunday) and equals core's answer for the same day, as does epoch.
+-- 1403-01-01 is a Wednesday
+SELECT jdate_part('dow', '1403-01-01'::jdate);      -- 4
 SELECT jdate_part('isodow', '1403-01-01'::jdate);   -- 3
 
 -- Unix epoch (seconds since 1970-01-01 UTC), same as date/timestamp
@@ -180,7 +182,7 @@ checked against the sources, the tests, or a running cluster. The essentials:
 | Comparison | `=` `<>` `<` `<=` `>` `>=`; default btree and hash operator classes; `min()`/`max()` |
 | Arithmetic | `jdate + int`, `int + jdate`, `jdate - int`, `jdate - jdate` (days) |
 | Casts | all assignment-level: `date`, `timestamp`, `timestamptz` to and from `jdate` |
-| Fields | `EXTRACT(... FROM jdate)`, `jdate_part`, `jdate_trunc`; `to_jdate`, `jdate_format` |
+| Fields | `EXTRACT(... FROM jdate)`, `jdate_part`, `jdate_trunc`; `to_jdate`, `jdate_format`; `dow` is Saturday-first (0 = Saturday .. 6 = Friday, `dow + 1` is 1-based), `isodow` is ISO 8601 (1 = Monday .. 7 = Sunday) |
 | Errors | SQLSTATE `22007`, `22008`, `22023`, `0A000` (see [the table](docs/SPECIFICATION.md#errors-and-sqlstates)) |
 | Extension | version 1.0, **not relocatable**, superuser to install, `extract(text, jdate)` lives in `pg_catalog` |
 | PostgreSQL | 16 or later; the regression suite runs in CI on 16, 17 and 18 (the local harness is 18 only) |

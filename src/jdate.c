@@ -621,12 +621,14 @@ jdate_get_field(DateADT value, int val, bool *isnull)
 	/*
 	 * Day-of-week and epoch do not depend on which calendar the date is read
 	 * through, so they come straight from the day number, never from the
-	 * Jalali fields.
+	 * Jalali fields. dow is Saturday-first (Saturday 0 .. Friday 6), which is
+	 * core's dow (Sunday 0) shifted by one; isodow is plain ISO 8601 (Monday 1
+	 * .. Sunday 7) and equals core's.
 	 */
 	switch (val)
 	{
 		case DTK_DOW:
-			return j2day(value + POSTGRES_EPOCH_JDATE);
+			return (j2day(value + POSTGRES_EPOCH_JDATE) + 1) % 7;
 		case DTK_ISODOW:
 			{
 				int			dow = j2day(value + POSTGRES_EPOCH_JDATE);

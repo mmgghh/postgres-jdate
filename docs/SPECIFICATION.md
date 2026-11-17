@@ -296,15 +296,19 @@ are not trimmed. For a finite day:
 | `doy` | 1 to 366, the day of the Jalali year (Farvardin 1 is 1) | Jalali date |
 | `decade` | the year divided by 10, rounded down (like core: `202` for 2024): years 1400 to 1409 are `140`, 0 to 9 are `0`, -10 to -1 are `-1`, and `-61` is `-7` | Jalali year |
 | `century` | years 1 to 100 are `1`, 1401 to 1500 are `15`, and years `-61` to `0` are `-1`; there is no century 0 (core's numbering) | Jalali year |
-| `dow` | 0 (Sunday) to 6 | the day number, **calendar-agnostic** |
-| `isodow` | 1 (Monday) to 7 (Sunday) | the day number, **calendar-agnostic** |
+| `dow` | 0 (Saturday) to 6 (Friday): the week starts on Saturday, so this is core's `dow` (Sunday 0) plus one, modulo 7; add 1 for a 1-based Saturday-first number | the day number, **calendar-agnostic** |
+| `isodow` | 1 (Monday) to 7 (Sunday): the ISO 8601 number, unchanged and equal to core's | the day number, **calendar-agnostic** |
 | `epoch` | seconds from 1970-01-01 00:00:00 UTC to the start of that day (negative before 1970), a multiple of 86400, exact in a `double` | the day number, **calendar-agnostic** |
 | `hour`, `minute`, `second`, `milliseconds`, `microseconds` | `0` | |
 
-`dow`, `isodow` and `epoch` equal core's answer (`date_part(unit, d::date)`)
-for every day in the range, and, because they never go through the Jalali
-conversion, they also work where that conversion cannot: for infinity they
-give the same results as core (see [Infinity](#infinity)). `week`, `millennium`,
+`isodow` and `epoch` equal core's answer (`date_part(unit, d::date)`) for every
+day in the range, and `dow` equals core's shifted to a Saturday start,
+`(date_part('dow', d::date)::int + 1) % 7`. `dow` is Saturday-first and
+`isodow` is the ISO one, so the two numbers differ on every day: 1403-01-01 is a
+Wednesday, `dow` 4 (core's is 3) and `isodow` 3. Because `dow`, `isodow` and
+`epoch` never go through the Jalali conversion, they also work where that
+conversion cannot: for infinity they give the same results as core (see
+[Infinity](#infinity)). `week`, `millennium`,
 `julian`, `isoyear`, `timezone`, `timezone_hour` and `timezone_minute` raise
 `0A000`; a name core does not know raises `22023`.
 

@@ -71,11 +71,12 @@ SELECT jdate_part('second', '1403-05-15'::jdate) AS f_second_zero;
              0
 (1 row)
 
--- dow/isodow are calendar-agnostic: must match the Gregorian answer for
--- the identical underlying day
-SELECT jdate_part('dow', '1403-05-15'::jdate) = date_part('dow', '1403-05-15'::jdate::date) AS dow_matches_gregorian;
- dow_matches_gregorian 
------------------------
+-- dow is Saturday-first (Saturday 0 .. Friday 6): core's dow (Sunday 0) plus
+-- one, modulo 7. isodow is the plain ISO number and must equal core's. Both
+-- are calendar-agnostic, so they follow the identical underlying day.
+SELECT jdate_part('dow', '1403-05-15'::jdate) = (date_part('dow', '1403-05-15'::jdate::date)::int + 1) % 7 AS dow_saturday_first;
+ dow_saturday_first 
+--------------------
  t
 (1 row)
 
@@ -259,11 +260,13 @@ FROM y;
   3239 |          0 |             0 |             0 |                 0 |               0
 (1 row)
 
--- dow, isodow and epoch are calendar-agnostic: they must equal core's answer
--- for the identical day, including at both ends of the supported range
+-- dow, isodow and epoch are calendar-agnostic: isodow and epoch must equal
+-- core's answer for the identical day, and dow is core's shifted to a
+-- Saturday start ((core dow + 1) % 7), including at both ends of the
+-- supported range
 SELECT d AS jdate,
        jdate_part('dow', d::jdate) AS dow,
-       jdate_part('dow', d::jdate) = date_part('dow', d::jdate::date) AS dow_ok,
+       jdate_part('dow', d::jdate) = (date_part('dow', d::jdate::date)::int + 1) % 7 AS dow_ok,
        jdate_part('isodow', d::jdate) AS isodow,
        jdate_part('isodow', d::jdate) = date_part('isodow', d::jdate::date) AS isodow_ok,
        jdate_part('epoch', d::jdate) AS epoch,
@@ -273,19 +276,73 @@ FROM (VALUES ('-0061-01-01'), ('0000-01-01'), ('1348-10-11'), ('1403-05-15'),
              ('3177-12-29')) AS v(d);
     jdate    | dow | dow_ok | isodow | isodow_ok |    epoch     | epoch_ok | extract_epoch_ok 
 -------------+-----+--------+--------+-----------+--------------+----------+------------------
- -0061-01-01 |   4 | t      |      4 | t         | -44488483200 | t        | t
- 0000-01-01  |   3 | t      |      3 | t         | -42563491200 | t        | t
- 1348-10-11  |   4 | t      |      4 | t         |            0 | t        | t
- 1403-05-15  |   1 | t      |      1 | t         |   1722816000 | t        | t
- 3177-12-29  |   2 | t      |      2 | t         |  57724358400 | t        | t
+ -0061-01-01 |   5 | t      |      4 | t         | -44488483200 | t        | t
+ 0000-01-01  |   4 | t      |      3 | t         | -42563491200 | t        | t
+ 1348-10-11  |   5 | t      |      4 | t         |            0 | t        | t
+ 1403-05-15  |   2 | t      |      1 | t         |   1722816000 | t        | t
+ 3177-12-29  |   3 | t      |      2 | t         |  57724358400 | t        | t
 (5 rows)
+
+-- one full week, Saturday to Friday, side by side: dow counts from Saturday
+-- (0) to Friday (6), isodow from Monday (1) to Sunday (7). The first week
+-- crosses a month boundary (Mordad 31 -> Shahrivar 1, 1403); the second is in
+-- negative years and crosses the year boundary from -1 to 0. The to_char
+-- column is core's own weekday name for the same day, from the Gregorian date.
+SELECT d AS jdate,
+       to_char(d::date, 'Dy') AS weekday,
+       jdate_part('dow', d) AS dow,
+       jdate_part('isodow', d) AS isodow,
+       EXTRACT(dow FROM d) AS extract_dow,
+       EXTRACT(isodow FROM d) AS extract_isodow,
+       date_part('dow', d::date) AS core_dow
+FROM (SELECT '1403-05-27'::jdate + n AS d FROM generate_series(0, 6) AS n) AS w
+ORDER BY d;
+   jdate    | weekday | dow | isodow | extract_dow | extract_isodow | core_dow 
+------------+---------+-----+--------+-------------+----------------+----------
+ 1403-05-27 | Sat     |   0 |      6 |           0 |              6 |        6
+ 1403-05-28 | Sun     |   1 |      7 |           1 |              7 |        0
+ 1403-05-29 | Mon     |   2 |      1 |           2 |              1 |        1
+ 1403-05-30 | Tue     |   3 |      2 |           3 |              2 |        2
+ 1403-05-31 | Wed     |   4 |      3 |           4 |              3 |        3
+ 1403-06-01 | Thu     |   5 |      4 |           5 |              4 |        4
+ 1403-06-02 | Fri     |   6 |      5 |           6 |              5 |        5
+(7 rows)
+
+SELECT d AS jdate,
+       to_char(d::date, 'Dy') AS weekday,
+       jdate_part('dow', d) AS dow,
+       jdate_part('isodow', d) AS isodow,
+       EXTRACT(dow FROM d) AS extract_dow,
+       EXTRACT(isodow FROM d) AS extract_isodow,
+       date_part('dow', d::date) AS core_dow
+FROM (SELECT '-0001-12-26'::jdate + n AS d FROM generate_series(0, 6) AS n) AS w
+ORDER BY d;
+    jdate    | weekday | dow | isodow | extract_dow | extract_isodow | core_dow 
+-------------+---------+-----+--------+-------------+----------------+----------
+ -0001-12-26 | Sat     |   0 |      6 |           0 |              6 |        6
+ -0001-12-27 | Sun     |   1 |      7 |           1 |              7 |        0
+ -0001-12-28 | Mon     |   2 |      1 |           2 |              1 |        1
+ -0001-12-29 | Tue     |   3 |      2 |           3 |              2 |        2
+ 0000-01-01  | Wed     |   4 |      3 |           4 |              3 |        3
+ 0000-01-02  | Thu     |   5 |      4 |           5 |              4 |        4
+ 0000-01-03  | Fri     |   6 |      5 |           6 |              5 |        5
+(7 rows)
+
+-- 1403-01-01 is a Wednesday: dow 4 (Saturday-first), isodow 3
+SELECT jdate_part('dow', '1403-01-01'::jdate) AS dow_new_year,
+       jdate_part('isodow', '1403-01-01'::jdate) AS isodow_new_year,
+       jdate_part('dow', '1403-01-01'::jdate) + 1 AS dow_one_based;
+ dow_new_year | isodow_new_year | dow_one_based 
+--------------+-----------------+---------------
+            4 |               3 |             5
+(1 row)
 
 -- the same over every day of the supported range, jdate_part and EXTRACT
 SELECT count(*) AS days,
-       count(*) FILTER (WHERE jdate_part('dow', d) <> date_part('dow', d::date)) AS dow_differs,
+       count(*) FILTER (WHERE jdate_part('dow', d) <> (date_part('dow', d::date)::int + 1) % 7) AS dow_differs,
        count(*) FILTER (WHERE jdate_part('isodow', d) <> date_part('isodow', d::date)) AS isodow_differs,
        count(*) FILTER (WHERE jdate_part('epoch', d) <> date_part('epoch', d::date)) AS epoch_differs,
-       count(*) FILTER (WHERE EXTRACT(dow FROM d) <> EXTRACT(dow FROM d::date)) AS extract_dow_differs,
+       count(*) FILTER (WHERE EXTRACT(dow FROM d) <> (EXTRACT(dow FROM d::date)::int + 1) % 7) AS extract_dow_differs,
        count(*) FILTER (WHERE EXTRACT(epoch FROM d) <> EXTRACT(epoch FROM d::date)) AS extract_epoch_differs
 FROM (SELECT g::date::jdate AS d
       FROM generate_series('-0061-01-01'::jdate::date::timestamp,
@@ -348,7 +405,7 @@ ORDER BY v <> 'infinity', f;
 
 -- the same through EXTRACT (numeric)
 SELECT v,
-       EXTRACT(dow FROM v::jdate) IS NOT DISTINCT FROM EXTRACT(dow FROM v::date) AS dow_same,
+       EXTRACT(dow FROM v::jdate) IS NOT DISTINCT FROM (EXTRACT(dow FROM v::date)::int + 1) % 7 AS dow_same,
        EXTRACT(isodow FROM v::jdate) IS NOT DISTINCT FROM EXTRACT(isodow FROM v::date) AS isodow_same,
        EXTRACT(epoch FROM v::jdate) IS NOT DISTINCT FROM EXTRACT(epoch FROM v::date) AS epoch_same,
        EXTRACT(year FROM v::jdate) IS NOT DISTINCT FROM EXTRACT(year FROM v::date) AS year_same,
