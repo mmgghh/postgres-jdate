@@ -33,7 +33,31 @@ Then, connected to the target database:
 CREATE EXTENSION jdate;
 ```
 
-Requires PostgreSQL 14 or later.
+Requires PostgreSQL 16 or later (`make` stops with an error on PostgreSQL 12
+to 15). Two features need more than that baseline: `pg_input_is_valid()` and
+`pg_input_error_info()` work with `jdate` from 16, while `COPY ...
+(ON_ERROR ignore)` skipping bad `jdate` values needs 17 (see
+[Soft errors](#soft-errors)).
+
+### Installing into a schema
+
+The extension is **not relocatable**: choose its schema when you create it,
+`CREATE EXTENSION jdate SCHEMA s`, and it stays there.
+
+```sql
+CREATE SCHEMA s;
+CREATE EXTENSION jdate SCHEMA s;
+```
+
+The type, its operators, operator classes, aggregates and functions all go in
+`s`, except one function. `EXTRACT(field FROM x)` always resolves to
+`pg_catalog.extract(text, ...)`, so the `extract(text, jdate)` overload that
+makes `EXTRACT(... FROM jdate)` work lives in `pg_catalog`, and the server
+cannot move it along with the rest of the extension. That is also why
+`EXTRACT` works whether or not `s` is on the `search_path` (the type itself
+then has to be written `s.jdate`). `ALTER EXTENSION jdate SET SCHEMA ...` is
+refused (`extension "jdate" does not support SET SCHEMA`, SQLSTATE `0A000`);
+to use a different schema, drop and recreate the extension.
 
 ## Usage
 
@@ -78,9 +102,20 @@ SELECT jdate_trunc('month', happened_on) FROM events;
 -- first year of the decade
 SELECT jdate_part('decade', '1403-05-15'::jdate);    -- 140
 
+-- dow (0 = Sunday), isodow (1 = Monday .. 7 = Sunday) and epoch do not depend
+-- on the calendar, so they equal core's answer for the same day
+SELECT jdate_part('dow', '1403-01-01'::jdate);       -- 3 (a Wednesday)
+SELECT jdate_part('isodow', '1403-01-01'::jdate);    -- 3
+
 -- Unix epoch (seconds since 1970-01-01 UTC), same as date/timestamp
 SELECT EXTRACT(epoch FROM '1403-01-01'::jdate);      -- 1710892800
 SELECT to_jdate(1710892800);                         -- 1403-01-01
+
+-- infinity follows core's date (see Infinity below): units that only grow
+-- give +/-Infinity, units that cycle give NULL
+SELECT EXTRACT(year FROM 'infinity'::jdate);         -- Infinity
+SELECT EXTRACT(century FROM '-infinity'::jdate);     -- -Infinity
+SELECT EXTRACT(month FROM 'infinity'::jdate);        -- NULL
 
 -- to_jdate() is the Jalali date of the UTC day that contains the timestamp.
 -- The session TimeZone plays no part, so the answer is the same in every
@@ -95,6 +130,8 @@ SELECT to_timestamp(1710892800)::jdate;              -- 1402-12-29
 -- docs/design/)
 SELECT jdate_format(now());                  -- '1403-05-15 12:03:41.482917'
 SELECT jdate_format(now(), false);           -- '1403-05-15'
+SELECT jdate_format('infinity'::timestamptz);        -- 'infinity'
+SELECT jdate_format('-infinity'::timestamptz, false); -- '-infinity'
 ```
 
 ## Supported range
@@ -119,6 +156,50 @@ Each raises SQLSTATE `22008` (`datetime_value_out_of_range`) and the statement
 stores nothing; text that cannot be read as a year-month-day triple at all
 raises `22007` (`invalid_datetime_format`). `jdate -> date` and the casts to
 `timestamp`/`timestamptz` cannot fail, since every `jdate` is a valid `date`.
+
+## Infinity
+
+`infinity` and `-infinity` are valid `jdate` values, with no calendar date to
+convert, so the field functions answer the same way core's `date` does. This
+applies to `jdate_part(unit, x)` (a `double precision`) and to
+`EXTRACT(unit FROM x)` (a `numeric`):
+
+| unit | `infinity` | `-infinity` |
+| --- | --- | --- |
+| `year`, `decade`, `century`, `epoch` | `Infinity` | `-Infinity` |
+| `month`, `day`, `quarter`, `doy`, `dow`, `isodow` | `NULL` | `NULL` |
+| `hour`, `minute`, `second`, `milliseconds`, `microseconds` | `NULL` | `NULL` |
+
+The units that only grow with time are infinite, the ones that cycle have no
+value. The time-of-day units are `0` for every finite `jdate`, but `NULL` for
+infinity. A unit `jdate_part` does not support (such as `week`) is still an
+error for infinity, as for any other value. `jdate_trunc` returns an infinite
+value unchanged, and `jdate_format(timestamptz)` returns `'infinity'` or
+`'-infinity'` (with or without the time, in any `TimeZone`), the same text
+`jdate_out` produces.
+
+## Soft errors
+
+Text input reports bad values as *soft* errors (the PostgreSQL 16 error
+saving API), so a bad value can be tested for or skipped instead of aborting
+the statement:
+
+```sql
+SELECT pg_input_is_valid('1403-13-01', 'jdate');                    -- false
+SELECT pg_input_is_valid('{1403-01-01,x}', 'jdate[]');              -- false (one bad element)
+SELECT message, sql_error_code FROM pg_input_error_info('3178-01-01', 'jdate');
+--   date out of range for type jdate: "3178-01-01" | 22008
+
+-- PostgreSQL 17+: load the good rows, skip the bad ones
+COPY events (happened_on, name) FROM STDIN (ON_ERROR ignore);
+```
+
+The errors keep their SQLSTATEs (`22007` for text that cannot be read as a
+date, `22008` for a value out of range), and a bad value still raises an
+ordinary error where nothing asks for soft handling: `'garbage'::jdate`, and
+`COPY` with the default `ON_ERROR stop`, which stops at the first bad row and
+loads nothing. Only text input is soft. Binary input, arithmetic and the casts
+from `date`, `timestamp` and `timestamptz` always raise.
 
 ## Testing without root
 
