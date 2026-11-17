@@ -19,6 +19,10 @@ EXCEPTION WHEN OTHERS THEN
 END
 $f$;
 
+-- A schema other than the one jdate is installed in: ALTER EXTENSION ... SET
+-- SCHEMA is a no-op, and gives no error, when the target is the current schema.
+CREATE SCHEMA sqlstate_other;
+
 CREATE TEMP TABLE cases (n serial, label text, stmt text, expected text);
 
 INSERT INTO cases (label, stmt, expected) VALUES
@@ -61,7 +65,7 @@ INSERT INTO cases (label, stmt, expected) VALUES
 ('jdate_trunc hour',
  $$SELECT jdate_trunc('hour', jdate '1403-05-15')$$, '0A000'),
 ('ALTER EXTENSION SET SCHEMA (not relocatable)',
- $$ALTER EXTENSION jdate SET SCHEMA public$$, '0A000'),
+ $$ALTER EXTENSION jdate SET SCHEMA sqlstate_other$$, '0A000'),
 
 -- 42883: an operator or function the type does not define
 ('jdate = date',
@@ -108,3 +112,5 @@ ORDER BY n;
 -- The failed ALTER EXTENSION left the extension where it was
 SELECT extname, extnamespace::regnamespace AS schema
 FROM pg_extension WHERE extname = 'jdate';
+
+DROP SCHEMA sqlstate_other;
