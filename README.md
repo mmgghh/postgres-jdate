@@ -27,6 +27,10 @@ sudo make install     # copies jdate.so + control/SQL files into your
                        # this step needs filesystem access to the server
 ```
 
+Building needs the server development files (on Debian/Ubuntu
+`postgresql-server-dev-NN`) and `pg_config` on the `PATH`; `make
+PG_CONFIG=/path/to/pg_config` picks a specific installation.
+
 Then, connected to the target database:
 
 ```sql
@@ -126,8 +130,7 @@ SELECT to_jdate(1710892800);                         -- 1403-01-01
 SELECT to_timestamp(1710892800)::jdate;              -- 1402-12-29
 
 -- Jalali date + local clock time for a timestamptz, respecting the
--- session's TimeZone (until a native jtimestamptz type ships -- see
--- docs/design/)
+-- session's TimeZone (a bridge: there is no native Jalali timestamp type yet)
 SELECT jdate_format(now());                  -- '1403-05-15 12:03:41.482917'
 SELECT jdate_format(now(), false);           -- '1403-05-15'
 SELECT jdate_format('infinity'::timestamptz);        -- 'infinity'
@@ -191,7 +194,11 @@ SELECT message, sql_error_code FROM pg_input_error_info('3178-01-01', 'jdate');
 --   date out of range for type jdate: "3178-01-01" | 22008
 
 -- PostgreSQL 17+: load the good rows, skip the bad ones
-COPY events (happened_on, name) FROM STDIN (ON_ERROR ignore);
+COPY events (happened_on, name) FROM STDIN (FORMAT csv, ON_ERROR ignore);
+1403-01-01,Nowruz
+1403-13-01,not a date
+1403-01-13,Sizdah Bedar
+\.
 ```
 
 The errors keep their SQLSTATEs (`22007` for text that cannot be read as a
@@ -201,22 +208,89 @@ ordinary error where nothing asks for soft handling: `'garbage'::jdate`, and
 loads nothing. Only text input is soft. Binary input, arithmetic and the casts
 from `date`, `timestamp` and `timestamptz` always raise.
 
-## Testing without root
+## Testing
+
+There are three layers: a standalone C test of the calendar code, the
+`pg_regress` suite, and a `pg_dump`/restore round trip. The last two run on a
+local, self-owned PostgreSQL instance, so none of it needs root.
+
+### The calendar code on its own
+
+```sh
+make test-jalaali
+```
+
+Compiles `src/jalaali.c` and `src/test_jalaali.c` with the plain C compiler
+(no server and no PostgreSQL headers; `pg_config` must still be on the `PATH`
+because the `Makefile` includes PGXS) and runs the result in about a second.
+It walks all 1,183,020 days of the supported range: converting a day number
+to a Jalali date and back returns the same day, consecutive days are
+consecutive, and the Jalali and Gregorian conversions agree in both directions
+with an independent Gregorian implementation written in the test itself. It
+also checks the range boundaries (one day past either end is rejected) and the
+Nowruz dates. It uses `assert()`, so it refuses to build with `NDEBUG`; it
+aborts on the first failed check and prints a one-line summary when everything
+holds.
+
+### The regression suite and the dump round trip
 
 Installing a C extension normally needs root (writing into the server's
 `pkglibdir`/`sharedir`). `dev/test-cluster.sh` avoids that by running a
-self-owned PostgreSQL 18 instance that points `extension_control_path`
-and `dynamic_library_path` (PG18+) at a directory it fully controls:
+self-owned PostgreSQL 18 instance in `.dev/` that points
+`extension_control_path` and `dynamic_library_path` at a directory the script
+fully controls:
 
 ```sh
-dev/test-cluster.sh check   # fetches PG18 headers once, initdb's a local
-                             # cluster, builds jdate.so, runs the full
-                             # pg_regress suite -- no root, ever
+dev/test-cluster.sh check              # setup, start, build, then all three test
+                                       # layers below -- no root, ever
+dev/test-cluster.sh check io fields    # the same, but only the named regression tests
+dev/test-cluster.sh tests              # print the regression test names
+dev/test-cluster.sh dumptest           # only the pg_dump/restore round trip
+dev/test-cluster.sh jalaali            # only `make test-jalaali`
+dev/test-cluster.sh stop               # stop the local cluster
 ```
 
-This is for local development/testing only; the `Makefile`/`make install`
-path above is the normal, standard way to install the extension for real
-use.
+`check` is idempotent and runs, in this order:
+
+1. `pg_regress` over every entry of `REGRESS` in the `Makefile`, the single list
+   the script reads (or only the names given). Output lands in `test/results/`,
+   and a failure writes `test/regression.diffs`.
+2. `dev/dump-roundtrip.sh` (`dumptest`). It builds a database of boundary days,
+   a negative year, year `0000`, both infinities, a `jdate[]` column, a column
+   default and `CHECK`, btree and hash indexes, a `PARTITION BY HASH` table and
+   a view over `EXTRACT`. It dumps that three ways (plain, plain with
+   `--inserts`, and custom format with `pg_restore`), restores each into a
+   fresh database and compares every value (as text and as its binary form),
+   index, default, constraint, partition bound and view definition with the
+   source. `pg_dump -t <table>` must also succeed. The whole thing runs twice,
+   with the extension in the default schema and with `CREATE EXTENSION jdate
+   SCHEMA ...`.
+3. `make test-jalaali`, described above.
+
+The regression tests are `io` (also runs `CREATE EXTENSION`), `casts`,
+`operators`, `arithmetic`, `fields`, `format`, `range` (every path that can
+produce a `jdate`, with SQLSTATEs), `binary`, `hash` (the hash operator class,
+including `PARTITION BY HASH`), `fullrange`, `softerr` and `extension_schema`.
+`fullrange` is the exhaustive one: it covers all 1,183,020 days and
+cross-checks the Jalali fields against core's own Gregorian date machinery
+rather than against `src/jalaali.c`, so a conversion bug cannot cancel itself
+out. `extension_schema` drops and recreates the extension, so it stays last.
+
+The first `setup` needs network access, `curl` and `dpkg-deb`: it downloads the
+PostgreSQL 18 server development package from `apt.postgresql.org` and unpacks it
+under `.dev/` (nothing is installed system-wide), and it expects the PostgreSQL 18
+server binaries in `/usr/lib/postgresql/18/bin`. The cluster listens on port
+`55439` (override with `JDATE_DEV_PORT`) and keeps running after `check`; use
+`stop` when you are done.
+
+The harness needs PostgreSQL 18, because `extension_control_path` is new in
+18, while the extension itself supports 16 and later. Only the 18 harness runs
+the suite; other majors are not exercised here. One test needs more than the
+baseline: the `COPY ... (ON_ERROR ignore)` cases in `softerr` need PostgreSQL
+17, so on 16 that one file's output would differ.
+
+The `Makefile`/`make install` path above remains the normal way to install the
+extension for real use; the harness is for local development and testing.
 
 ## Credits
 
