@@ -1,0 +1,246 @@
+-- Exhaustive test of jtimestamp and jtimestamptz over the whole supported
+-- range: all 1,183,020 days from -0061-01-01 to 3177-12-29, each at its first
+-- (00:00:00) and its last (23:59:59.999999) microsecond. Every check reports
+-- a count of violations (0) or a single boolean, so the output is
+-- deterministic and has no row dumps. Like fullrange.sql it checks the Jalali
+-- conversion against core's Gregorian machinery (date, timestamp, timestamptz,
+-- the date + 1 arithmetic) rather than against our own code, so a bug in the
+-- conversion cannot cancel itself out. It passes on correct code by design;
+-- the negative controls at the end show the checks are able to fail.
+--
+-- jtimestamp is checked on every day. jtimestamptz is checked under UTC and
+-- Asia/Tehran on a sample of the days (every 23rd day, the first and last few
+-- days, and every day from 1976 to 2022, which is where Tehran changed its
+-- clocks): it turns the same Jalali date into an instant with core's zone
+-- code, so the day-by-day conversion is already covered, and a sample keeps
+-- the file near 10 seconds. fullrange.sql covers the jdate day by day.
+--
+-- jtimestamptz keeps a safe range: its first valid instant is 16 hours after
+-- the start of the first day and its last one 16 hours before the end of the
+-- last day (every stored instant must print in any zone). In both zones the
+-- local midnight of the very first day and the last microsecond of the very
+-- last day fall outside it: they are tried separately, as errors.
+SET timezone = 'UTC';
+SET DateStyle = 'ISO, YMD';
+-- One row per day. g counts from the first day, d is the jdate, t its text
+-- and dt the Gregorian date of the same day, counted by core from
+-- 0560-03-20. a0 is the first microsecond, parsed from the Jalali text, a1
+-- the last one, made from core's timestamp of the Gregorian date.
+CREATE TEMP TABLE jfr AS
+SELECT g, d, t, dt,
+       (t || ' 00:00:00')::jtimestamp AS a0,
+       (dt + time '23:59:59.999999')::jtimestamp AS a1
+FROM (SELECT g, d, d::text AS t, date '0560-03-20' + g AS dt
+      FROM (SELECT g, '-0061-01-01'::jdate + g AS d
+            FROM generate_series(0, 1183019) AS g) AS q) AS s;
+SELECT count(*) AS days, min(d) AS first_day, max(d) AS last_day,
+       count(*) FILTER (WHERE d::date <> dt) AS jdate_to_date_violations
+FROM jfr;
+  days   |  first_day  |  last_day  | jdate_to_date_violations 
+---------+-------------+------------+--------------------------
+ 1183020 | -0061-01-01 | 3177-12-29 |                        0
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- jtimestamp, every day
+-- ---------------------------------------------------------------------
+-- it prints as the jdate text plus the time
+SELECT count(*) FILTER (WHERE a0::text <> t || ' 00:00:00') AS start_text_violations,
+       count(*) FILTER (WHERE a1::text <> t || ' 23:59:59.999999') AS end_text_violations
+FROM jfr;
+ start_text_violations | end_text_violations 
+-----------------------+---------------------
+                     0 |                   0
+(1 row)
+
+-- its Gregorian date equals jdate::date, and the whole timestamp is core's:
+-- midnight of that date, and 23:59:59.999999 of it
+SELECT count(*) FILTER (WHERE a0::timestamp::date <> d::date
+                           OR a1::timestamp::date <> d::date) AS gregorian_date_violations,
+       count(*) FILTER (WHERE a0::timestamp <> dt::timestamp) AS start_timestamp_violations,
+       count(*) FILTER (WHERE a1::timestamp <> dt + time '23:59:59.999999') AS end_timestamp_violations
+FROM jfr;
+ gregorian_date_violations | start_timestamp_violations | end_timestamp_violations 
+---------------------------+----------------------------+--------------------------
+                         0 |                          0 |                        0
+(1 row)
+
+-- the jdate comes back out of both, and the cast from jdate is the start
+SELECT count(*) FILTER (WHERE a0::jdate <> d OR a1::jdate <> d) AS back_to_jdate_violations,
+       count(*) FILTER (WHERE jtimestamp_send(a0) <> jtimestamp_send(d::jtimestamp)) AS from_jdate_violations
+FROM jfr;
+ back_to_jdate_violations | from_jdate_violations 
+--------------------------+-----------------------
+                        0 |                     0
+(1 row)
+
+-- the end of the day parsed from text is what was made from core's timestamp
+-- (every 97th day: the time part does not depend on the day)
+SELECT count(*) AS sampled,
+       count(*) FILTER (WHERE jtimestamp_send((t || ' 23:59:59.999999')::jtimestamp) <> jtimestamp_send(a1)) AS parse_violations
+FROM jfr WHERE g % 97 = 0;
+ sampled | parse_violations 
+---------+------------------
+   12197 |                0
+(1 row)
+
+-- contiguity: day g starts exactly g days after the first day, and each day
+-- lasts exactly a day (its last microsecond is one microsecond short of it),
+-- so the first microsecond of every day follows the last microsecond of the
+-- day before, one microsecond later, with no gap and no overlap
+SELECT count(*) FILTER (WHERE a0::timestamp <> timestamp '0560-03-20' + g * interval '1 day') AS start_spacing_violations,
+       count(*) FILTER (WHERE a1::timestamp - a0::timestamp <> interval '1 day' - interval '1 microsecond') AS day_length_violations
+FROM jfr;
+ start_spacing_violations | day_length_violations 
+--------------------------+-----------------------
+                        0 |                     0
+(1 row)
+
+-- the same said directly, as a window over the days in the order they are
+-- stored (no sort: that is what keeps it cheap; the second count shows the
+-- order is the day order), on the first 200000 days
+SELECT count(*) AS gaps_checked,
+       count(*) FILTER (WHERE g <> pg + 1) AS order_violations,
+       count(*) FILTER (WHERE gap <> interval '1 microsecond') AS contiguity_violations
+FROM (SELECT g, lag(g) OVER () AS pg,
+             a0::timestamp - lag(a1::timestamp) OVER () AS gap
+      FROM jfr WHERE g < 200000) AS q
+WHERE g > 0;
+ gaps_checked | order_violations | contiguity_violations 
+--------------+------------------+-----------------------
+       199999 |                0 |                     0
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- jtimestamptz: the sampled days. u0 and u1 are the first and last
+-- microsecond of the day parsed from the Jalali text in the session zone.
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE jfr_s AS
+SELECT g, d, t, dt FROM jfr
+WHERE g % 23 = 0 OR g < 5 OR g > 1183014 OR dt BETWEEN '1976-01-01' AND '2022-12-31';
+SELECT count(*) AS sampled_days FROM jfr_s;
+ sampled_days 
+--------------
+        67865
+(1 row)
+
+-- Under UTC
+CREATE TEMP TABLE jfr_utc AS
+SELECT g, d, t, dt,
+       CASE WHEN g > 0 THEN (t || ' 00:00:00')::jtimestamptz END AS u0,
+       CASE WHEN g < 1183019 THEN (t || ' 23:59:59.999999')::jtimestamptz END AS u1
+FROM jfr_s;
+SELECT count(u0) AS starts, count(u1) AS ends,
+       count(*) FILTER (WHERE u0::text <> t || ' 00:00:00+00') AS start_text_violations,
+       count(*) FILTER (WHERE u1::text <> t || ' 23:59:59.999999+00') AS end_text_violations
+FROM jfr_utc;
+ starts | ends  | start_text_violations | end_text_violations 
+--------+-------+-----------------------+---------------------
+  67864 | 67864 |                     0 |                   0
+(1 row)
+
+-- the instant is core's local midnight / last microsecond of the Gregorian
+-- date, the local date is the jdate, and the end of a day is one microsecond
+-- before core's midnight of the next date
+SELECT count(*) FILTER (WHERE u0::timestamptz <> dt::timestamptz) AS start_instant_violations,
+       count(*) FILTER (WHERE u1::timestamptz <> (dt + time '23:59:59.999999')::timestamptz) AS end_instant_violations,
+       count(*) FILTER (WHERE u1::timestamptz + interval '1 microsecond' <> (dt + 1)::timestamptz) AS next_midnight_violations,
+       count(*) FILTER (WHERE u0::jdate <> d OR u1::jdate <> d) AS local_date_violations,
+       count(*) FILTER (WHERE u0::timestamptz::date <> d::date
+                           OR u1::timestamptz::date <> d::date) AS gregorian_date_violations
+FROM jfr_utc;
+ start_instant_violations | end_instant_violations | next_midnight_violations | local_date_violations | gregorian_date_violations 
+--------------------------+------------------------+--------------------------+-----------------------+---------------------------
+                        0 |                      0 |                        0 |                     0 |                         0
+(1 row)
+
+-- the two instants that fall outside the safe range
+\set VERBOSITY sqlstate
+SELECT ((SELECT t FROM jfr WHERE g = 0) || ' 00:00:00')::jtimestamptz IS NOT NULL AS first_day_start;
+ERROR:  22008
+SELECT ((SELECT t FROM jfr WHERE g = 1183019) || ' 23:59:59.999999')::jtimestamptz IS NOT NULL AS last_day_end;
+ERROR:  22008
+\set VERBOSITY default
+-- Under Asia/Tehran. Expected values come from core in the same zone: the
+-- local midnight of the date (a clock time that does not exist on a day the
+-- clocks go forward is the first valid one, as core decides it, so the local
+-- date of an end-of-day can be the next one: 1977-03-21 23:59:59.999999 does
+-- not exist), and core's own text of the instant.
+SET timezone = 'Asia/Tehran';
+CREATE TEMP TABLE jfr_thr AS
+SELECT g, d, t, dt,
+       CASE WHEN g > 0 THEN (t || ' 00:00:00')::jtimestamptz END AS h0,
+       CASE WHEN g < 1183019 THEN (t || ' 23:59:59.999999')::jtimestamptz END AS h1
+FROM jfr_s;
+SELECT count(h0) AS starts, count(h1) AS ends,
+       count(*) FILTER (WHERE h0::timestamptz <> dt::timestamptz) AS start_instant_violations,
+       count(*) FILTER (WHERE h1::timestamptz <> (dt + time '23:59:59.999999')::timestamptz) AS end_instant_violations,
+       count(*) FILTER (WHERE h0::jdate::date <> h0::timestamptz::date
+                           OR h1::jdate::date <> h1::timestamptz::date) AS local_date_violations
+FROM jfr_thr;
+ starts | ends  | start_instant_violations | end_instant_violations | local_date_violations 
+--------+-------+--------------------------+------------------------+-----------------------
+  67864 | 67864 |                        0 |                      0 |                     0
+(1 row)
+
+-- the text is the jdate text of core's local date and then core's text of
+-- the same instant (time and offset), whatever the offset of that day is
+SELECT count(*) FILTER (WHERE h0::text <> h0::timestamptz::date::jdate::text || substr(h0::timestamptz::text, 11)) AS start_text_violations,
+       count(*) FILTER (WHERE h1::text <> h1::timestamptz::date::jdate::text || substr(h1::timestamptz::text, 11)) AS end_text_violations,
+       count(*) FILTER (WHERE h0::text <> t || substr(h0::timestamptz::text, 11)) AS start_date_prefix_violations
+FROM jfr_thr;
+ start_text_violations | end_text_violations | start_date_prefix_violations 
+-----------------------+---------------------+------------------------------
+                     0 |                   0 |                            0
+(1 row)
+
+-- the two instants that fall outside the safe range
+\set VERBOSITY sqlstate
+SELECT ((SELECT t FROM jfr WHERE g = 0) || ' 00:00:00')::jtimestamptz IS NOT NULL AS first_day_start;
+ERROR:  22008
+SELECT ((SELECT t FROM jfr WHERE g = 1183019) || ' 23:59:59.999999')::jtimestamptz IS NOT NULL AS last_day_end;
+ERROR:  22008
+\set VERBOSITY default
+-- ---------------------------------------------------------------------
+-- Negative controls. This whole file passes on correct code, so these show
+-- the checks above can fail. Each compares the same data against something
+-- shifted or thinned and must report violations.
+-- ---------------------------------------------------------------------
+SET timezone = 'UTC';
+-- the text of the next day against this day's text
+SELECT count(*) > 0 AS control_text_detects_mismatch
+FROM jfr WHERE g % 997 = 0 AND g < 1183019 AND a0::text <> (d + 1)::text || ' 00:00:00';
+ control_text_detects_mismatch 
+-------------------------------
+ t
+(1 row)
+
+-- the Gregorian date against the day after it
+SELECT count(*) > 0 AS control_gregorian_detects_mismatch
+FROM jfr WHERE g % 997 = 0 AND a0::timestamp::date <> d::date + 1;
+ control_gregorian_detects_mismatch 
+------------------------------------
+ t
+(1 row)
+
+-- the contiguity query on every second day of the first 100000: every step is a gap
+SELECT count(*) FILTER (WHERE gap <> interval '1 microsecond') > 0 AS control_contiguity_detects_gaps
+FROM (SELECT g, a0::timestamp - lag(a1::timestamp) OVER () AS gap
+      FROM jfr WHERE g < 100000 AND g % 2 = 0) AS q
+WHERE g > 0;
+ control_contiguity_detects_gaps 
+---------------------------------
+ t
+(1 row)
+
+-- the Tehran text against the UTC form of it (+00 in place of the offset)
+SET timezone = 'Asia/Tehran';
+SELECT count(*) > 0 AS control_zone_detects_wrong_offset
+FROM jfr_thr WHERE g % 7 = 0 AND g > 0 AND h0::text <> t || ' 00:00:00+00';
+ control_zone_detects_wrong_offset 
+-----------------------------------
+ t
+(1 row)
+
+SET timezone = 'UTC';
+DROP TABLE jfr_thr, jfr_utc, jfr_s, jfr;

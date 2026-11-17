@@ -99,6 +99,93 @@ INSERT INTO cases (label, stmt, expected) VALUES
 ('jdate_trunc week: start before the first day',
  $$SELECT jdate_trunc('week', jdate '-0061-01-02')$$, '22008');
 
+-- jtimestamp and jtimestamptz, one row per entry of the SQLSTATE table of the
+-- design (the same code for both types). 22007: not a Jalali Y-M-D prefix, a
+-- second date, allballs; 22008: invalid Jalali date, a time field out of
+-- range, a value outside the range, BC, rounding past the edge, a cast or
+-- to_jtimestamptz result outside it; 22009: a zone displacement beyond
+-- +/-15:59:59; 22023: an unknown zone. Then spellings that must succeed.
+INSERT INTO cases (label, stmt, expected)
+SELECT t.typ || ': ' || e.label, format(e.stmt, t.typ), e.expected
+FROM (VALUES ('jtimestamp'), ('jtimestamptz')) AS t(typ),
+(VALUES
+  -- 22007: invalid_datetime_format
+  ('no Y-M-D prefix (garbage)',          $$SELECT 'garbage'::%s$$, '22007'),
+  ('no Y-M-D prefix (empty)',            $$SELECT ''::%s$$, '22007'),
+  ('no Y-M-D prefix (time only)',        $$SELECT '12:00:00'::%s$$, '22007'),
+  ('no Y-M-D prefix (Gregorian words)',  $$SELECT 'March 20, 2024 12:00'::%s$$, '22007'),
+  ('no Y-M-D prefix (special word with a prefix)', $$SELECT 'epoch 12:00'::%s$$, '22007'),
+  ('duplicate date',                     $$SELECT '1403-05-15 1403-05-16'::%s$$, '22007'),
+  ('allballs without a date',            $$SELECT 'allballs'::%s$$, '22007'),
+  ('trailing junk after the date',       $$SELECT '1403-05-15x 10:00'::%s$$, '22007'),
+  -- 22008: datetime_field_overflow
+  ('month 13',                           $$SELECT '1403-13-01 10:00'::%s$$, '22008'),
+  ('1404-12-30 (not a leap year)',       $$SELECT '1404-12-30 10:00'::%s$$, '22008'),
+  ('1403-07-31 (month 7 has 30 days)',   $$SELECT '1403-07-31 10:00'::%s$$, '22008'),
+  ('hour 25',                            $$SELECT '1403-05-15 25:00'::%s$$, '22008'),
+  ('minute 60',                          $$SELECT '1403-05-15 10:60'::%s$$, '22008'),
+  ('BC token',                           $$SELECT '1403-05-15 10:00 BC'::%s$$, '22008'),
+  ('year above the range',               $$SELECT '3178-01-01 00:00:00'::%s$$, '22008'),
+  ('year below the range',               $$SELECT '-0062-12-29 00:00:00'::%s$$, '22008'),
+  ('year overflowing int32',             $$SELECT '99999999999-01-01 10:00'::%s$$, '22008'),
+  ('24:00:00 of the last day',           $$SELECT '3177-12-29 24:00:00'::%s$$, '22008'),
+  ('1403-05-15 24:00:00 is the next day (must succeed)', $$SELECT '1403-05-15 24:00:00'::%s$$, 'ok'),
+  -- 22009: invalid_time_zone_displacement_value
+  ('zone displacement +16:00',           $$SELECT '1403-05-15 10:00+16:00'::%s$$, '22009'),
+  ('zone displacement -16:00',           $$SELECT '1403-05-15 10:00-16:00'::%s$$, '22009'),
+  ('zone displacement +15:59:59 (must succeed)', $$SELECT '1403-05-15 10:00+15:59:59'::%s$$, 'ok'),
+  -- 22023: invalid_parameter_value
+  ('unknown zone name',                  $$SELECT '1403-05-15 10:00 Mars/Olympus'::%s$$, '22023'),
+  -- spellings that must succeed
+  ('plain value',                        $$SELECT '1403-05-15 10:00'::%s$$, 'ok'),
+  ('date only',                          $$SELECT '1403-05-15'::%s$$, 'ok'),
+  ('first valid day',                    $$SELECT '-0061-01-01 16:00:00+00'::%s$$, 'ok'),
+  ('last valid instant of jtimestamptz',  $$SELECT '3177-12-29 07:59:59.999999+00'::%s$$, 'ok'),
+  ('fraction beyond 6 digits is rounded', $$SELECT '1403-05-15 10:00:00.123456789'::%s$$, 'ok'),
+  ('named zone',                         $$SELECT '1403-05-15 10:00 America/New_York'::%s$$, 'ok'),
+  ('offset with minutes',                $$SELECT '1403-05-15 10:00+03:30'::%s$$, 'ok'),
+  ('AM/PM',                              $$SELECT '1403-05-15 10:00 PM'::%s$$, 'ok'),
+  ('infinity',                           $$SELECT 'infinity'::%s$$, 'ok'),
+  ('-infinity',                          $$SELECT '-infinity'::%s$$, 'ok'),
+  ('epoch',                              $$SELECT 'epoch'::%s$$, 'ok'),
+  ('now',                                $$SELECT 'now'::%s$$, 'ok'),
+  ('today',                              $$SELECT 'today'::%s$$, 'ok'),
+  ('typmod (3) rounds within the range', $$SELECT '1403-05-15 10:00:00.1234'::%s(3)$$, 'ok')
+) AS e(label, stmt, expected);
+
+-- 22008 from the casts, typmod rounding and to_jtimestamptz (not from input)
+INSERT INTO cases (label, stmt, expected) VALUES
+('jtimestamp: last valid microsecond (must succeed)',
+ $$SELECT '3177-12-29 23:59:59.999999'::jtimestamp$$, 'ok'),
+('jtimestamptz: the same clock time is above the safe range',
+ $$SELECT '3177-12-29 23:59:59.999999+00'::jtimestamptz$$, '22008'),
+('jtimestamp: typmod (0) rounds past the last edge',
+ $$SELECT '3177-12-29 23:59:59.999999'::jtimestamp(0)$$, '22008'),
+('jtimestamptz: typmod (0) rounds past the last instant',
+ $$SELECT '3177-12-29 07:59:59.999999+00'::jtimestamptz(0)$$, '22008'),
+('timestamp -> jtimestamp: below the first',
+ $$SELECT timestamp '0560-03-19 23:59:59.999999'::jtimestamp$$, '22008'),
+('timestamp -> jtimestamp: above the last',
+ $$SELECT timestamp '3799-03-20 00:00:00'::jtimestamp$$, '22008'),
+('date -> jtimestamp: above the last',
+ $$SELECT date '3799-03-20'::jtimestamp$$, '22008'),
+('timestamptz -> jtimestamptz: below the first instant',
+ $$SELECT timestamptz '0560-03-20 15:59:59.999999+00'::jtimestamptz$$, '22008'),
+('timestamptz -> jtimestamptz: above the last instant',
+ $$SELECT timestamptz '3799-03-19 08:00:00+00'::jtimestamptz$$, '22008'),
+('jdate -> jtimestamptz: first day (local midnight is below the safe range)',
+ $$SELECT jdate '-0061-01-01'::jtimestamptz$$, '22008'),
+('jtimestamp -> jtimestamptz: end of the last day',
+ $$SELECT jtimestamp '3177-12-29 23:59:59.999999'::jtimestamptz$$, '22008'),
+('to_jtimestamptz: NaN',
+ $$SELECT to_jtimestamptz('NaN'::float8)$$, '22008'),
+('to_jtimestamptz: epoch of the first Jalali day start (below the safe range)',
+ $$SELECT to_jtimestamptz(-44488483200)$$, '22008'),
+('to_jtimestamptz: first valid second (must succeed)',
+ $$SELECT to_jtimestamptz(-44488425600)$$, 'ok'),
+('to_jtimestamptz: infinity (must succeed)',
+ $$SELECT to_jtimestamptz('infinity'::float8)$$, 'ok');
+
 SELECT label,
        pg_temp.state(stmt) AS sqlstate,
        pg_temp.state(stmt) = expected AS as_expected

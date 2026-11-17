@@ -90,45 +90,219 @@ INSERT INTO cases (label, stmt, expected) VALUES
  $$SELECT jdate '-0061-01-01' - 1$$, '22008'),
 ('jdate_trunc week: start before the first day',
  $$SELECT jdate_trunc('week', jdate '-0061-01-02')$$, '22008');
+-- jtimestamp and jtimestamptz, one row per entry of the SQLSTATE table of the
+-- design (the same code for both types). 22007: not a Jalali Y-M-D prefix, a
+-- second date, allballs; 22008: invalid Jalali date, a time field out of
+-- range, a value outside the range, BC, rounding past the edge, a cast or
+-- to_jtimestamptz result outside it; 22009: a zone displacement beyond
+-- +/-15:59:59; 22023: an unknown zone. Then spellings that must succeed.
+INSERT INTO cases (label, stmt, expected)
+SELECT t.typ || ': ' || e.label, format(e.stmt, t.typ), e.expected
+FROM (VALUES ('jtimestamp'), ('jtimestamptz')) AS t(typ),
+(VALUES
+  -- 22007: invalid_datetime_format
+  ('no Y-M-D prefix (garbage)',          $$SELECT 'garbage'::%s$$, '22007'),
+  ('no Y-M-D prefix (empty)',            $$SELECT ''::%s$$, '22007'),
+  ('no Y-M-D prefix (time only)',        $$SELECT '12:00:00'::%s$$, '22007'),
+  ('no Y-M-D prefix (Gregorian words)',  $$SELECT 'March 20, 2024 12:00'::%s$$, '22007'),
+  ('no Y-M-D prefix (special word with a prefix)', $$SELECT 'epoch 12:00'::%s$$, '22007'),
+  ('duplicate date',                     $$SELECT '1403-05-15 1403-05-16'::%s$$, '22007'),
+  ('allballs without a date',            $$SELECT 'allballs'::%s$$, '22007'),
+  ('trailing junk after the date',       $$SELECT '1403-05-15x 10:00'::%s$$, '22007'),
+  -- 22008: datetime_field_overflow
+  ('month 13',                           $$SELECT '1403-13-01 10:00'::%s$$, '22008'),
+  ('1404-12-30 (not a leap year)',       $$SELECT '1404-12-30 10:00'::%s$$, '22008'),
+  ('1403-07-31 (month 7 has 30 days)',   $$SELECT '1403-07-31 10:00'::%s$$, '22008'),
+  ('hour 25',                            $$SELECT '1403-05-15 25:00'::%s$$, '22008'),
+  ('minute 60',                          $$SELECT '1403-05-15 10:60'::%s$$, '22008'),
+  ('BC token',                           $$SELECT '1403-05-15 10:00 BC'::%s$$, '22008'),
+  ('year above the range',               $$SELECT '3178-01-01 00:00:00'::%s$$, '22008'),
+  ('year below the range',               $$SELECT '-0062-12-29 00:00:00'::%s$$, '22008'),
+  ('year overflowing int32',             $$SELECT '99999999999-01-01 10:00'::%s$$, '22008'),
+  ('24:00:00 of the last day',           $$SELECT '3177-12-29 24:00:00'::%s$$, '22008'),
+  ('1403-05-15 24:00:00 is the next day (must succeed)', $$SELECT '1403-05-15 24:00:00'::%s$$, 'ok'),
+  -- 22009: invalid_time_zone_displacement_value
+  ('zone displacement +16:00',           $$SELECT '1403-05-15 10:00+16:00'::%s$$, '22009'),
+  ('zone displacement -16:00',           $$SELECT '1403-05-15 10:00-16:00'::%s$$, '22009'),
+  ('zone displacement +15:59:59 (must succeed)', $$SELECT '1403-05-15 10:00+15:59:59'::%s$$, 'ok'),
+  -- 22023: invalid_parameter_value
+  ('unknown zone name',                  $$SELECT '1403-05-15 10:00 Mars/Olympus'::%s$$, '22023'),
+  -- spellings that must succeed
+  ('plain value',                        $$SELECT '1403-05-15 10:00'::%s$$, 'ok'),
+  ('date only',                          $$SELECT '1403-05-15'::%s$$, 'ok'),
+  ('first valid day',                    $$SELECT '-0061-01-01 16:00:00+00'::%s$$, 'ok'),
+  ('last valid instant of jtimestamptz',  $$SELECT '3177-12-29 07:59:59.999999+00'::%s$$, 'ok'),
+  ('fraction beyond 6 digits is rounded', $$SELECT '1403-05-15 10:00:00.123456789'::%s$$, 'ok'),
+  ('named zone',                         $$SELECT '1403-05-15 10:00 America/New_York'::%s$$, 'ok'),
+  ('offset with minutes',                $$SELECT '1403-05-15 10:00+03:30'::%s$$, 'ok'),
+  ('AM/PM',                              $$SELECT '1403-05-15 10:00 PM'::%s$$, 'ok'),
+  ('infinity',                           $$SELECT 'infinity'::%s$$, 'ok'),
+  ('-infinity',                          $$SELECT '-infinity'::%s$$, 'ok'),
+  ('epoch',                              $$SELECT 'epoch'::%s$$, 'ok'),
+  ('now',                                $$SELECT 'now'::%s$$, 'ok'),
+  ('today',                              $$SELECT 'today'::%s$$, 'ok'),
+  ('typmod (3) rounds within the range', $$SELECT '1403-05-15 10:00:00.1234'::%s(3)$$, 'ok')
+) AS e(label, stmt, expected);
+-- 22008 from the casts, typmod rounding and to_jtimestamptz (not from input)
+INSERT INTO cases (label, stmt, expected) VALUES
+('jtimestamp: last valid microsecond (must succeed)',
+ $$SELECT '3177-12-29 23:59:59.999999'::jtimestamp$$, 'ok'),
+('jtimestamptz: the same clock time is above the safe range',
+ $$SELECT '3177-12-29 23:59:59.999999+00'::jtimestamptz$$, '22008'),
+('jtimestamp: typmod (0) rounds past the last edge',
+ $$SELECT '3177-12-29 23:59:59.999999'::jtimestamp(0)$$, '22008'),
+('jtimestamptz: typmod (0) rounds past the last instant',
+ $$SELECT '3177-12-29 07:59:59.999999+00'::jtimestamptz(0)$$, '22008'),
+('timestamp -> jtimestamp: below the first',
+ $$SELECT timestamp '0560-03-19 23:59:59.999999'::jtimestamp$$, '22008'),
+('timestamp -> jtimestamp: above the last',
+ $$SELECT timestamp '3799-03-20 00:00:00'::jtimestamp$$, '22008'),
+('date -> jtimestamp: above the last',
+ $$SELECT date '3799-03-20'::jtimestamp$$, '22008'),
+('timestamptz -> jtimestamptz: below the first instant',
+ $$SELECT timestamptz '0560-03-20 15:59:59.999999+00'::jtimestamptz$$, '22008'),
+('timestamptz -> jtimestamptz: above the last instant',
+ $$SELECT timestamptz '3799-03-19 08:00:00+00'::jtimestamptz$$, '22008'),
+('jdate -> jtimestamptz: first day (local midnight is below the safe range)',
+ $$SELECT jdate '-0061-01-01'::jtimestamptz$$, '22008'),
+('jtimestamp -> jtimestamptz: end of the last day',
+ $$SELECT jtimestamp '3177-12-29 23:59:59.999999'::jtimestamptz$$, '22008'),
+('to_jtimestamptz: NaN',
+ $$SELECT to_jtimestamptz('NaN'::float8)$$, '22008'),
+('to_jtimestamptz: epoch of the first Jalali day start (below the safe range)',
+ $$SELECT to_jtimestamptz(-44488483200)$$, '22008'),
+('to_jtimestamptz: first valid second (must succeed)',
+ $$SELECT to_jtimestamptz(-44488425600)$$, 'ok'),
+('to_jtimestamptz: infinity (must succeed)',
+ $$SELECT to_jtimestamptz('infinity'::float8)$$, 'ok');
 SELECT label,
        pg_temp.state(stmt) AS sqlstate,
        pg_temp.state(stmt) = expected AS as_expected
 FROM cases
 ORDER BY n;
-                    label                     | sqlstate | as_expected 
-----------------------------------------------+----------+-------------
- jdate_part unknown unit                      | 22023    | t
- extract unknown unit                         | 22023    | t
- jdate_trunc unknown unit                     | 22023    | t
- jdate_part epoch (RESERV, must succeed)      | ok       | t
- extract epoch (RESERV, must succeed)         | ok       | t
- jdate_part year (must succeed)               | ok       | t
- jdate_trunc month (must succeed)             | ok       | t
- jdate_part week                              | 0A000    | t
- jdate_part millennium                        | 0A000    | t
- jdate_part julian                            | 0A000    | t
- jdate_part isoyear                           | 0A000    | t
- jdate_part timezone                          | 0A000    | t
- jdate_part timezone_hour                     | 0A000    | t
- jdate_part timezone_minute                   | 0A000    | t
- extract week                                 | 0A000    | t
- jdate_trunc decade                           | 0A000    | t
- jdate_trunc hour                             | 0A000    | t
- ALTER EXTENSION SET SCHEMA (not relocatable) | 0A000    | t
- jdate = date                                 | 42883    | t
- jdate + interval                             | 42883    | t
- jdate + bigint                               | 42883    | t
- date_part(text, jdate)                       | 42883    | t
- infinity - jdate                             | 22008    | t
- jdate - infinity                             | 22008    | t
- input: syntax error                          | 22007    | t
- input: month 13                              | 22008    | t
- input: year above range                      | 22008    | t
- input: year below range                      | 22008    | t
- arithmetic: past the last day                | 22008    | t
- arithmetic: before the first day             | 22008    | t
- jdate_trunc week: start before the first day | 22008    | t
-(31 rows)
+                                    label                                    | sqlstate | as_expected 
+-----------------------------------------------------------------------------+----------+-------------
+ jdate_part unknown unit                                                     | 22023    | t
+ extract unknown unit                                                        | 22023    | t
+ jdate_trunc unknown unit                                                    | 22023    | t
+ jdate_part epoch (RESERV, must succeed)                                     | ok       | t
+ extract epoch (RESERV, must succeed)                                        | ok       | t
+ jdate_part year (must succeed)                                              | ok       | t
+ jdate_trunc month (must succeed)                                            | ok       | t
+ jdate_part week                                                             | 0A000    | t
+ jdate_part millennium                                                       | 0A000    | t
+ jdate_part julian                                                           | 0A000    | t
+ jdate_part isoyear                                                          | 0A000    | t
+ jdate_part timezone                                                         | 0A000    | t
+ jdate_part timezone_hour                                                    | 0A000    | t
+ jdate_part timezone_minute                                                  | 0A000    | t
+ extract week                                                                | 0A000    | t
+ jdate_trunc decade                                                          | 0A000    | t
+ jdate_trunc hour                                                            | 0A000    | t
+ ALTER EXTENSION SET SCHEMA (not relocatable)                                | 0A000    | t
+ jdate = date                                                                | 42883    | t
+ jdate + interval                                                            | 42883    | t
+ jdate + bigint                                                              | 42883    | t
+ date_part(text, jdate)                                                      | 42883    | t
+ infinity - jdate                                                            | 22008    | t
+ jdate - infinity                                                            | 22008    | t
+ input: syntax error                                                         | 22007    | t
+ input: month 13                                                             | 22008    | t
+ input: year above range                                                     | 22008    | t
+ input: year below range                                                     | 22008    | t
+ arithmetic: past the last day                                               | 22008    | t
+ arithmetic: before the first day                                            | 22008    | t
+ jdate_trunc week: start before the first day                                | 22008    | t
+ jtimestamp: no Y-M-D prefix (garbage)                                       | 22007    | t
+ jtimestamptz: no Y-M-D prefix (garbage)                                     | 22007    | t
+ jtimestamp: no Y-M-D prefix (empty)                                         | 22007    | t
+ jtimestamptz: no Y-M-D prefix (empty)                                       | 22007    | t
+ jtimestamp: no Y-M-D prefix (time only)                                     | 22007    | t
+ jtimestamptz: no Y-M-D prefix (time only)                                   | 22007    | t
+ jtimestamp: no Y-M-D prefix (Gregorian words)                               | 22007    | t
+ jtimestamptz: no Y-M-D prefix (Gregorian words)                             | 22007    | t
+ jtimestamp: no Y-M-D prefix (special word with a prefix)                    | 22007    | t
+ jtimestamptz: no Y-M-D prefix (special word with a prefix)                  | 22007    | t
+ jtimestamp: duplicate date                                                  | 22007    | t
+ jtimestamptz: duplicate date                                                | 22007    | t
+ jtimestamp: allballs without a date                                         | 22007    | t
+ jtimestamptz: allballs without a date                                       | 22007    | t
+ jtimestamp: trailing junk after the date                                    | 22007    | t
+ jtimestamptz: trailing junk after the date                                  | 22007    | t
+ jtimestamp: month 13                                                        | 22008    | t
+ jtimestamptz: month 13                                                      | 22008    | t
+ jtimestamp: 1404-12-30 (not a leap year)                                    | 22008    | t
+ jtimestamptz: 1404-12-30 (not a leap year)                                  | 22008    | t
+ jtimestamp: 1403-07-31 (month 7 has 30 days)                                | 22008    | t
+ jtimestamptz: 1403-07-31 (month 7 has 30 days)                              | 22008    | t
+ jtimestamp: hour 25                                                         | 22008    | t
+ jtimestamptz: hour 25                                                       | 22008    | t
+ jtimestamp: minute 60                                                       | 22008    | t
+ jtimestamptz: minute 60                                                     | 22008    | t
+ jtimestamp: BC token                                                        | 22008    | t
+ jtimestamptz: BC token                                                      | 22008    | t
+ jtimestamp: year above the range                                            | 22008    | t
+ jtimestamptz: year above the range                                          | 22008    | t
+ jtimestamp: year below the range                                            | 22008    | t
+ jtimestamptz: year below the range                                          | 22008    | t
+ jtimestamp: year overflowing int32                                          | 22008    | t
+ jtimestamptz: year overflowing int32                                        | 22008    | t
+ jtimestamp: 24:00:00 of the last day                                        | 22008    | t
+ jtimestamptz: 24:00:00 of the last day                                      | 22008    | t
+ jtimestamp: 1403-05-15 24:00:00 is the next day (must succeed)              | ok       | t
+ jtimestamptz: 1403-05-15 24:00:00 is the next day (must succeed)            | ok       | t
+ jtimestamp: zone displacement +16:00                                        | 22009    | t
+ jtimestamptz: zone displacement +16:00                                      | 22009    | t
+ jtimestamp: zone displacement -16:00                                        | 22009    | t
+ jtimestamptz: zone displacement -16:00                                      | 22009    | t
+ jtimestamp: zone displacement +15:59:59 (must succeed)                      | ok       | t
+ jtimestamptz: zone displacement +15:59:59 (must succeed)                    | ok       | t
+ jtimestamp: unknown zone name                                               | 22023    | t
+ jtimestamptz: unknown zone name                                             | 22023    | t
+ jtimestamp: plain value                                                     | ok       | t
+ jtimestamptz: plain value                                                   | ok       | t
+ jtimestamp: date only                                                       | ok       | t
+ jtimestamptz: date only                                                     | ok       | t
+ jtimestamp: first valid day                                                 | ok       | t
+ jtimestamptz: first valid day                                               | ok       | t
+ jtimestamp: last valid instant of jtimestamptz                              | ok       | t
+ jtimestamptz: last valid instant of jtimestamptz                            | ok       | t
+ jtimestamp: fraction beyond 6 digits is rounded                             | ok       | t
+ jtimestamptz: fraction beyond 6 digits is rounded                           | ok       | t
+ jtimestamp: named zone                                                      | ok       | t
+ jtimestamptz: named zone                                                    | ok       | t
+ jtimestamp: offset with minutes                                             | ok       | t
+ jtimestamptz: offset with minutes                                           | ok       | t
+ jtimestamp: AM/PM                                                           | ok       | t
+ jtimestamptz: AM/PM                                                         | ok       | t
+ jtimestamp: infinity                                                        | ok       | t
+ jtimestamptz: infinity                                                      | ok       | t
+ jtimestamp: -infinity                                                       | ok       | t
+ jtimestamptz: -infinity                                                     | ok       | t
+ jtimestamp: epoch                                                           | ok       | t
+ jtimestamptz: epoch                                                         | ok       | t
+ jtimestamp: now                                                             | ok       | t
+ jtimestamptz: now                                                           | ok       | t
+ jtimestamp: today                                                           | ok       | t
+ jtimestamptz: today                                                         | ok       | t
+ jtimestamp: typmod (3) rounds within the range                              | ok       | t
+ jtimestamptz: typmod (3) rounds within the range                            | ok       | t
+ jtimestamp: last valid microsecond (must succeed)                           | ok       | t
+ jtimestamptz: the same clock time is above the safe range                   | 22008    | t
+ jtimestamp: typmod (0) rounds past the last edge                            | 22008    | t
+ jtimestamptz: typmod (0) rounds past the last instant                       | 22008    | t
+ timestamp -> jtimestamp: below the first                                    | 22008    | t
+ timestamp -> jtimestamp: above the last                                     | 22008    | t
+ date -> jtimestamp: above the last                                          | 22008    | t
+ timestamptz -> jtimestamptz: below the first instant                        | 22008    | t
+ timestamptz -> jtimestamptz: above the last instant                         | 22008    | t
+ jdate -> jtimestamptz: first day (local midnight is below the safe range)   | 22008    | t
+ jtimestamp -> jtimestamptz: end of the last day                             | 22008    | t
+ to_jtimestamptz: NaN                                                        | 22008    | t
+ to_jtimestamptz: epoch of the first Jalali day start (below the safe range) | 22008    | t
+ to_jtimestamptz: first valid second (must succeed)                          | ok       | t
+ to_jtimestamptz: infinity (must succeed)                                    | ok       | t
+(120 rows)
 
 -- Any row that did not give its expected code (none)
 SELECT label, expected, pg_temp.state(stmt) AS got
