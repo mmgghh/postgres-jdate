@@ -37,9 +37,10 @@ JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
 WHERE p.proparallel <> 's' OR s.proparallel <> 's'
 ORDER BY 1;
 
--- the checks above are not vacuous: they looked at functions and at the
--- two aggregates min(jdate) and max(jdate)
-SELECT count(*) > 20 AS functions_checked,
+-- the checks above are not vacuous: they looked at the extension's functions
+-- (at least 75) and at its six aggregates, min() and max() of jdate,
+-- jtimestamp and jtimestamptz
+SELECT count(*) FILTER (WHERE p.prokind = 'f') >= 75 AS functions_checked,
        count(*) FILTER (WHERE p.prokind = 'a') AS aggregates_checked
 FROM pg_proc p
 JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
@@ -47,8 +48,8 @@ JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
                 AND d.refclassid = 'pg_extension'::regclass
                 AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'jdate');
 
--- min(jdate) and max(jdate) have a combine function (so they can run as
--- Partial/Finalize Aggregate), and it is a PARALLEL SAFE function
+-- min() and max() of the three types have a combine function (so they can run
+-- as Partial/Finalize Aggregate), and it is a PARALLEL SAFE function
 SELECT a.aggfnoid::regprocedure AS aggregate,
        a.aggcombinefn::regproc AS combinefn,
        c.proparallel AS combinefn_parallel
@@ -61,10 +62,13 @@ JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
 ORDER BY 1;
 
 -- ---------------------------------------------------------------------
--- data: 200000 rows over 30000 distinct days, as jdate and as date
+-- data: 200000 rows over 30000 distinct days, as jdate and as date, and with
+-- a time of day as jtimestamp and jtimestamptz
 -- ---------------------------------------------------------------------
 CREATE TABLE par_t AS
-    SELECT i AS id, i % 50 AS g, dt, dt::jdate AS d
+    SELECT i AS id, i % 50 AS g, dt, dt::jdate AS d,
+           (dt::timestamp + (i % 86400) * interval '1 second')::jtimestamp AS ts,
+           (dt::timestamptz + (i % 86400) * interval '1 second')::jtimestamptz AS tz
     FROM (SELECT i, DATE '1970-01-01' + (i % 30000) AS dt
           FROM generate_series(1, 200000) i) s;
 -- a small table with one row per day, to join against
@@ -85,6 +89,8 @@ SET max_parallel_workers_per_gather = 2;
 SET enable_mergejoin = off;
 SET enable_nestloop = off;
 
+-- Labels sort the same in every collation: the 'j' queries (jtimestamp) and the
+-- 't' queries (jtimestamptz) come after the digit ones.
 -- Each query returns one text column v. node is a plan node that must also
 -- appear (Gather Merge for ORDER BY, Hash Join for the join). ordered means
 -- the query has a total ORDER BY, so the checksum also covers row order.
@@ -119,6 +125,30 @@ INSERT INTO par_queries VALUES
      'Hash Join', false),
     ('6 min_max_by_col',
      $q$SELECT g::text || ':' || min(d)::text || ':' || max(d)::text FROM par_t GROUP BY g$q$,
+     'Finalize', false),
+    ('j1 filter',
+     $q$SELECT id::text FROM par_t WHERE ts > '1400-01-01 12:00:00' AND ts <= '1400-12-29 12:00:00'$q$,
+     NULL, false),
+    ('j2 order_by',
+     $q$SELECT ts::text || ':' || id::text FROM par_t ORDER BY ts, id$q$,
+     'Gather Merge', true),
+    ('j3 min_max',
+     $q$SELECT min(ts)::text || ' ' || max(ts)::text FROM par_t$q$,
+     NULL, false),
+    ('j3 min_max_by_col',
+     $q$SELECT g::text || ':' || min(ts)::text || ':' || max(ts)::text FROM par_t GROUP BY g$q$,
+     'Finalize', false),
+    ('t1 filter',
+     $q$SELECT id::text FROM par_t WHERE tz > '1400-01-01 12:00:00+00' AND tz <= '1400-12-29 12:00:00+00'$q$,
+     NULL, false),
+    ('t2 order_by',
+     $q$SELECT tz::text || ':' || id::text FROM par_t ORDER BY tz, id$q$,
+     'Gather Merge', true),
+    ('t3 min_max',
+     $q$SELECT min(tz)::text || ' ' || max(tz)::text FROM par_t$q$,
+     NULL, false),
+    ('t3 min_max_by_col',
+     $q$SELECT g::text || ':' || min(tz)::text || ':' || max(tz)::text FROM par_t GROUP BY g$q$,
      'Finalize', false);
 
 -- true when the EXPLAIN output of the query has a line containing node
@@ -145,15 +175,18 @@ SELECT label,
 FROM par_queries
 ORDER BY label;
 
--- min/max must use a two-phase aggregate: Partial Aggregate below the
--- Gather, Finalize Aggregate above it (plain, and grouped by a column).
+-- min/max of each of the three types must use a two-phase aggregate: Partial
+-- Aggregate below the Gather, Finalize Aggregate above it (plain, and grouped
+-- by a column).
 -- Query 7 groups by an expression, for which the planner estimates too
 -- many groups to go two-phase; it is only checked for equal results in (c).
 SELECT label,
        par_plan_has(query, 'Partial') AS has_partial,
        par_plan_has(query, 'Finalize') AS has_finalize
 FROM par_queries
-WHERE label IN ('6 min_max', '6 min_max_by_col')
+WHERE label IN ('6 min_max', '6 min_max_by_col',
+                'j3 min_max', 'j3 min_max_by_col',
+                't3 min_max', 't3 min_max_by_col')
 ORDER BY label;
 
 -- ---------------------------------------------------------------------

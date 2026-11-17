@@ -700,3 +700,42 @@ BEGIN
     END IF;
 END
 $do$;
+
+-- ============================================================
+-- min() and max() for jtimestamp and jtimestamptz
+-- ============================================================
+--
+-- As for jdate above: a btree opclass does not give a new type its own
+-- min()/max(), so each type needs its aggregates. Both aggregates take the
+-- transition function as COMBINEFUNC (core does the same for timestamp), so
+-- the planner may run them as Partial/Finalize Aggregate under a Gather; the
+-- functions are STRICT, so a NULL partial state is skipped. The functions
+-- delegate to core's timestamp_smaller / timestamp_larger (core's timestamptz
+-- ones are the same functions). They return one of their arguments, so no
+-- range check is needed. SORTOP lets the planner answer min()/max() with an
+-- index scan on a btree index of the column.
+CREATE FUNCTION jtimestamp_smaller(jtimestamp, jtimestamp) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jtimestamp_smaller' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_larger(jtimestamp, jtimestamp) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jtimestamp_larger' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_smaller(jtimestamptz, jtimestamptz) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jtimestamptz_smaller' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_larger(jtimestamptz, jtimestamptz) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jtimestamptz_larger' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE AGGREGATE min(jtimestamp) (
+    SFUNC = jtimestamp_smaller, STYPE = jtimestamp, COMBINEFUNC = jtimestamp_smaller,
+    SORTOP = <, PARALLEL = SAFE
+);
+CREATE AGGREGATE max(jtimestamp) (
+    SFUNC = jtimestamp_larger, STYPE = jtimestamp, COMBINEFUNC = jtimestamp_larger,
+    SORTOP = >, PARALLEL = SAFE
+);
+CREATE AGGREGATE min(jtimestamptz) (
+    SFUNC = jtimestamptz_smaller, STYPE = jtimestamptz, COMBINEFUNC = jtimestamptz_smaller,
+    SORTOP = <, PARALLEL = SAFE
+);
+CREATE AGGREGATE max(jtimestamptz) (
+    SFUNC = jtimestamptz_larger, STYPE = jtimestamptz, COMBINEFUNC = jtimestamptz_larger,
+    SORTOP = >, PARALLEL = SAFE
+);

@@ -10,7 +10,9 @@
  * both types.
  *
  * Ordering and equality need no range check: they only look at values that
- * are already stored, and every stored value is valid.
+ * are already stored, and every stored value is valid. The same holds for
+ * the smaller/larger functions behind min() and max(): they return one of
+ * their two arguments.
  *
  * The SQL side (operators, the shared btree family jdatetime_ops, the hash
  * opclasses) is in jdate--1.0.sql. Its sort support, equalimage and skip
@@ -21,7 +23,7 @@
 #include "fmgr.h"
 #include "utils/fmgrprotos.h"
 
-/* bool f(a, b), int4 f(a, b) and int4/int8 hash wrappers */
+/* bool f(a, b), int4 f(a, b), hash and smaller/larger wrappers */
 #define JTS_WRAP2(name, core) \
 	PG_FUNCTION_INFO_V1(name); \
 	Datum \
@@ -48,6 +50,8 @@ JTS_WRAP2(jtimestamp_ge, timestamp_ge)
 JTS_WRAP2(jtimestamp_cmp, timestamp_cmp)
 JTS_WRAP1(jtimestamp_hash, timestamp_hash)
 JTS_WRAP2(jtimestamp_hash_extended, timestamp_hash_extended)
+JTS_WRAP2(jtimestamp_smaller, timestamp_smaller)
+JTS_WRAP2(jtimestamp_larger, timestamp_larger)
 
 /* jtimestamptz */
 JTS_WRAP2(jtimestamptz_eq, timestamp_eq)
@@ -59,3 +63,5 @@ JTS_WRAP2(jtimestamptz_ge, timestamp_ge)
 JTS_WRAP2(jtimestamptz_cmp, timestamp_cmp)
 JTS_WRAP1(jtimestamptz_hash, timestamp_hash)
 JTS_WRAP2(jtimestamptz_hash_extended, timestamp_hash_extended)
+JTS_WRAP2(jtimestamptz_smaller, timestamp_smaller)
+JTS_WRAP2(jtimestamptz_larger, timestamp_larger)

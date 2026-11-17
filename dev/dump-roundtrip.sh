@@ -6,7 +6,8 @@
 # a column default and a CHECK, btree and hash indexes, a PARTITION BY HASH
 # table, a view that uses EXTRACT and jdate_trunc; for jtimestamp and
 # jtimestamptz: edge values, infinities, a NULL, jtimestamp(0)/(3) typmod
-# columns, array columns, a DEFAULT and a CHECK), dumps it in three forms
+# columns, array columns, a DEFAULT and a CHECK, btree and hash indexes and
+# PARTITION BY HASH tables), dumps it in three forms
 # (plain, plain with --inserts, custom + pg_restore) into fresh databases and
 # compares what comes back with the source: every value as text and as its
 # binary send form, in order, plus the index, default, CHECK, partition-bound
@@ -215,20 +216,62 @@ INSERT INTO jt_rt_arr VALUES
     (3, '{}', '{}'),
     (4, NULL, NULL);
 
--- A DEFAULT and a CHECK on a jtimestamp and a jtimestamptz column. There are
--- no jtimestamp operators yet, so the CHECKs compare through the binary casts
--- to core's timestamp / timestamptz.
+-- A DEFAULT and CHECKs on a jtimestamp and a jtimestamptz column: two compare
+-- through the binary casts to core's timestamp / timestamptz, two use the
+-- types' own operators.
 CREATE TABLE jt_rt_def (
     id int PRIMARY KEY,
     ts jtimestamp NOT NULL DEFAULT '1403-01-01 00:00:00',
     tz jtimestamptz NOT NULL DEFAULT '1403-01-01 00:00:00+03:30',
     CONSTRAINT jt_rt_def_ts_after CHECK (ts::timestamp > '1800-01-01 00:00:00'::timestamp),
-    CONSTRAINT jt_rt_def_tz_after CHECK (tz::timestamptz > '1800-01-01 00:00:00+00'::timestamptz)
+    CONSTRAINT jt_rt_def_tz_after CHECK (tz::timestamptz > '1800-01-01 00:00:00+00'::timestamptz),
+    CONSTRAINT jt_rt_def_ts_native CHECK (ts > '-0061-01-01 00:00:00'::jtimestamp),
+    CONSTRAINT jt_rt_def_tz_native CHECK (tz >= '-0061-01-01 16:00:00+00'::jtimestamptz)
 );
 INSERT INTO jt_rt_def (id) VALUES (1);
 INSERT INTO jt_rt_def VALUES
     (2, '1399-06-31 08:00:00', '1399-06-31 08:00:00-05'),
     (3, 'infinity', 'infinity');
+
+-- btree and hash indexes on the jtimestamp and jtimestamptz columns, plain and
+-- descending with a predicate, as for jdate.
+CREATE INDEX jt_rt_ts_btree ON jt_rt_ts USING btree (ts);
+CREATE INDEX jt_rt_ts_hash ON jt_rt_ts USING hash (ts);
+CREATE INDEX jt_rt_ts_desc ON jt_rt_ts (ts DESC NULLS LAST) WHERE ts IS NOT NULL;
+CREATE INDEX jt_rt_tz_btree ON jt_rt_tz USING btree (tz);
+CREATE INDEX jt_rt_tz_hash ON jt_rt_tz USING hash (tz);
+CREATE INDEX jt_rt_tz_desc ON jt_rt_tz (tz DESC NULLS LAST) WHERE tz IS NOT NULL;
+
+-- PARTITION BY HASH on a jtimestamp and on a jtimestamptz column: which
+-- partition a row lands in depends on the type's extended hash function, so a
+-- restore that changed the hash would show here.
+CREATE TABLE jt_rt_part_ts (
+    id int,
+    ts jtimestamp
+) PARTITION BY HASH (ts);
+CREATE TABLE jt_rt_part_ts_0 PARTITION OF jt_rt_part_ts FOR VALUES WITH (MODULUS 3, REMAINDER 0);
+CREATE TABLE jt_rt_part_ts_1 PARTITION OF jt_rt_part_ts FOR VALUES WITH (MODULUS 3, REMAINDER 1);
+CREATE TABLE jt_rt_part_ts_2 PARTITION OF jt_rt_part_ts FOR VALUES WITH (MODULUS 3, REMAINDER 2);
+CREATE INDEX jt_rt_part_ts_idx ON jt_rt_part_ts (ts);
+INSERT INTO jt_rt_part_ts
+SELECT g, (timestamp '2024-03-20 00:00:00' + g * interval '7 hours 11 minutes')::jtimestamp
+FROM generate_series(0, 59) g;
+INSERT INTO jt_rt_part_ts VALUES (100, '-0061-01-01 00:00:00'), (101, '3177-12-29 23:59:59.999999'),
+                                 (102, 'infinity'), (103, '-infinity'), (104, NULL);
+
+CREATE TABLE jt_rt_part_tz (
+    id int,
+    tz jtimestamptz
+) PARTITION BY HASH (tz);
+CREATE TABLE jt_rt_part_tz_0 PARTITION OF jt_rt_part_tz FOR VALUES WITH (MODULUS 3, REMAINDER 0);
+CREATE TABLE jt_rt_part_tz_1 PARTITION OF jt_rt_part_tz FOR VALUES WITH (MODULUS 3, REMAINDER 1);
+CREATE TABLE jt_rt_part_tz_2 PARTITION OF jt_rt_part_tz FOR VALUES WITH (MODULUS 3, REMAINDER 2);
+CREATE INDEX jt_rt_part_tz_idx ON jt_rt_part_tz (tz);
+INSERT INTO jt_rt_part_tz
+SELECT g, (timestamptz '2024-03-20 00:00:00+00' + g * interval '7 hours 11 minutes')::jtimestamptz
+FROM generate_series(0, 59) g;
+INSERT INTO jt_rt_part_tz VALUES (100, '-0061-01-01 16:00:00+00'), (101, '3177-12-29 07:59:59.999999+00'),
+                                 (102, 'infinity'), (103, '-infinity'), (104, NULL);
 SQL
 }
 
@@ -324,6 +367,37 @@ WHERE ad.adrelid = 'public.jt_rt_def'::regclass ORDER BY a.attname;
 SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint
 WHERE conrelid = 'public.jt_rt_def'::regclass ORDER BY conname;
 
+\qecho == jtimestamp and jtimestamptz indexes
+-- the operator classes are part of what must survive (the default btree and
+-- hash classes of each type)
+SELECT i.indexrelid::regclass::text AS idx, pg_get_indexdef(i.indexrelid),
+       (SELECT string_agg(oc.opcname, ',' ORDER BY u.ord)
+        FROM unnest(i.indclass::oid[]) WITH ORDINALITY u(o, ord)
+        JOIN pg_opclass oc ON oc.oid = u.o) AS opclasses
+FROM pg_index i
+WHERE i.indrelid IN (SELECT oid FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname LIKE 'jt\_rt\_%')
+ORDER BY 1;
+
+\qecho == jtimestamp and jtimestamptz partitions
+SELECT tableoid::regclass::text AS part, id, ts::text, encode(:schema.jtimestamp_send(ts), 'hex') AS send
+FROM public.jt_rt_part_ts ORDER BY part, id;
+SELECT tableoid::regclass::text AS part, id, tz::text, encode(:schema.jtimestamptz_send(tz), 'hex') AS send
+FROM public.jt_rt_part_tz ORDER BY part, id;
+SELECT c.relname, pg_get_expr(c.relpartbound, c.oid) AS bound
+FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+WHERE i.inhparent IN ('public.jt_rt_part_ts'::regclass, 'public.jt_rt_part_tz'::regclass)
+ORDER BY c.relname;
+SELECT pg_get_partkeydef('public.jt_rt_part_ts'::regclass), pg_get_partkeydef('public.jt_rt_part_tz'::regclass);
+-- every row is found again through the parent by its key (partition pruning
+-- by the hash of the key): a hash that differs from the one the rows were
+-- placed with would lose rows here. The NULL-key rows are left out.
+SELECT count(*) AS ts_rows, count(*) FILTER (WHERE found = 1) AS ts_found
+FROM (SELECT (SELECT count(*) FROM public.jt_rt_part_ts p WHERE p.ts OPERATOR(:schema.=) h.ts) AS found
+      FROM public.jt_rt_part_ts h WHERE h.ts IS NOT NULL) s;
+SELECT count(*) AS tz_rows, count(*) FILTER (WHERE found = 1) AS tz_found
+FROM (SELECT (SELECT count(*) FROM public.jt_rt_part_tz p WHERE p.tz OPERATOR(:schema.=) h.tz) AS found
+      FROM public.jt_rt_part_tz h WHERE h.tz IS NOT NULL) s;
+
 \qecho == types
 SELECT t.typname, t.typlen, t.typbyval, t.typalign, t.typstorage, t.typcategory, t.typnamespace::regnamespace,
        t.typmodin::regproc, t.typmodout::regproc
@@ -363,7 +437,7 @@ run_pass() {
 
 	# The original symptom: dumping a single jdate table must work.
 	local t
-	for t in jd_rt_days jd_rt_arr jd_rt_part jt_rt_ts jt_rt_tz jt_rt_typmod jt_rt_arr jt_rt_def; do
+	for t in jd_rt_days jd_rt_arr jd_rt_part jt_rt_ts jt_rt_tz jt_rt_typmod jt_rt_arr jt_rt_def jt_rt_part_ts jt_rt_part_tz; do
 		"$PGBIN/pg_dump" -d "$src" -t "$t" -f /dev/null \
 			|| fail "$label: pg_dump -t $t exited non-zero"
 	done
