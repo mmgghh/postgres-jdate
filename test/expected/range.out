@@ -177,11 +177,15 @@ ORDER BY castsource::regtype::text COLLATE "C", casttarget::regtype::text COLLAT
 -----------------------------+-----------------------------+------------------------------------+-------------
  date                        | jdate                       | jdate(date)                        | a
  jdate                       | date                        | -                                  | a
+ jdate                       | jtimestamp                  | jtimestamp(jdate)                  | a
+ jdate                       | jtimestamptz                | jtimestamptz(jdate)                | a
  jdate                       | timestamp with time zone    | timestamptz(jdate)                 | a
  jdate                       | timestamp without time zone | "timestamp"(jdate)                 | a
+ jtimestamp                  | jdate                       | jdate(jtimestamp)                  | a
+ jtimestamptz                | jdate                       | jdate(jtimestamptz)                | a
  timestamp with time zone    | jdate                       | jdate(timestamp with time zone)    | a
  timestamp without time zone | jdate                       | jdate(timestamp without time zone) | a
-(6 rows)
+(10 rows)
 
 SELECT provolatile, proisstrict, proparallel
 FROM pg_proc WHERE oid = 'jdate(date)'::regprocedure;

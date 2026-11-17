@@ -426,3 +426,96 @@ COMMENT ON TYPE jtimestamptz IS 'Jalali (Persian) timestamp with time zone, 8 by
 CREATE FUNCTION to_jtimestamptz(double precision) RETURNS jtimestamptz
     AS 'MODULE_PATHNAME', 'jtimestamptz_from_epoch'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- ============================================================
+-- Casts for jtimestamp and jtimestamptz
+-- ============================================================
+--
+-- As for jdate, no cast is IMPLICIT, apart from the typmod (scale) casts at
+-- the end, which only round: `jtimestamp = timestamp` stays an error instead
+-- of silently comparing two calendars' digits. Everything is ASSIGNMENT, so
+-- INSERT and UPDATE convert, and an explicit cast always works.
+--
+-- Out of a Jalali type into the core type of the same kind: binary (WITHOUT
+-- FUNCTION), a valid value is always a valid core value.
+CREATE CAST (jtimestamp AS timestamp) WITHOUT FUNCTION AS ASSIGNMENT;
+CREATE CAST (jtimestamptz AS timestamptz) WITHOUT FUNCTION AS ASSIGNMENT;
+
+-- Into a Jalali type from the core type: the same bits, but only inside the
+-- Jalali range (jtimestamptz: the safe range), SQLSTATE 22008 outside it.
+-- IMMUTABLE for both: the checks need no time zone.
+CREATE FUNCTION jtimestamp(timestamp) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'timestamp_jtimestamp'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE CAST (timestamp AS jtimestamp) WITH FUNCTION jtimestamp(timestamp) AS ASSIGNMENT;
+
+CREATE FUNCTION jtimestamptz(timestamptz) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'timestamptz_jtimestamptz'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE CAST (timestamptz AS jtimestamptz) WITH FUNCTION jtimestamptz(timestamptz) AS ASSIGNMENT;
+
+-- Between the two Jalali types: core's conversions through the session time
+-- zone (so STABLE), then the range check of the result. A jtimestamp that is
+-- valid can still be an instant outside the safe range, and the other
+-- direction cannot fail but is checked all the same.
+CREATE FUNCTION jtimestamptz(jtimestamp) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jtimestamp_jtimestamptz'
+    LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE CAST (jtimestamp AS jtimestamptz) WITH FUNCTION jtimestamptz(jtimestamp) AS ASSIGNMENT;
+
+CREATE FUNCTION jtimestamp(jtimestamptz) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jtimestamptz_jtimestamp'
+    LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE CAST (jtimestamptz AS jtimestamp) WITH FUNCTION jtimestamp(jtimestamptz) AS ASSIGNMENT;
+
+-- From date: midnight of the day, range-checked. For jtimestamptz it is local
+-- midnight in the session zone (STABLE, as core's date -> timestamptz), which
+-- the check can refuse even for a day inside the Jalali range.
+CREATE FUNCTION jtimestamp(date) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'date_jtimestamp'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE CAST (date AS jtimestamp) WITH FUNCTION jtimestamp(date) AS ASSIGNMENT;
+
+CREATE FUNCTION jtimestamptz(date) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'date_jtimestamptz'
+    LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE CAST (date AS jtimestamptz) WITH FUNCTION jtimestamptz(date) AS ASSIGNMENT;
+
+-- From jdate: the same, but a jdate is always inside the range, so only the
+-- zone-dependent jtimestamptz one has a check.
+CREATE FUNCTION jtimestamp(jdate) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jdate_jtimestamp'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE CAST (jdate AS jtimestamp) WITH FUNCTION jtimestamp(jdate) AS ASSIGNMENT;
+
+CREATE FUNCTION jtimestamptz(jdate) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jdate_jtimestamptz'
+    LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE CAST (jdate AS jtimestamptz) WITH FUNCTION jtimestamptz(jdate) AS ASSIGNMENT;
+
+-- To jdate: the calendar day (for jtimestamptz in the session zone, STABLE).
+-- A valid value always lies on a Jalali day, so there is no check.
+CREATE FUNCTION jdate(jtimestamp) RETURNS jdate
+    AS 'MODULE_PATHNAME', 'jtimestamp_jdate'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE CAST (jtimestamp AS jdate) WITH FUNCTION jdate(jtimestamp) AS ASSIGNMENT;
+
+CREATE FUNCTION jdate(jtimestamptz) RETURNS jdate
+    AS 'MODULE_PATHNAME', 'jtimestamptz_jdate'
+    LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE CAST (jtimestamptz AS jdate) WITH FUNCTION jdate(jtimestamptz) AS ASSIGNMENT;
+
+-- Typmod coercion, jtimestamp(p) and jtimestamptz(p): core's scale functions
+-- round to p fractional digits, then the range is checked again, because
+-- rounding up the last microseconds of the range leaves it. IMPLICIT like core's
+-- own (it only changes the precision of the same type), which is also what
+-- makes a literal or an INSERT apply the column's typmod.
+CREATE FUNCTION jtimestamp(jtimestamp, integer, boolean) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jtimestamp_scale'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE CAST (jtimestamp AS jtimestamp) WITH FUNCTION jtimestamp(jtimestamp, integer, boolean) AS IMPLICIT;
+
+CREATE FUNCTION jtimestamptz(jtimestamptz, integer, boolean) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jtimestamptz_scale'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE CAST (jtimestamptz AS jtimestamptz) WITH FUNCTION jtimestamptz(jtimestamptz, integer, boolean) AS IMPLICIT;

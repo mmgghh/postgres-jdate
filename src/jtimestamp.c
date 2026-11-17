@@ -404,3 +404,165 @@ jtimestamptz_from_epoch(PG_FUNCTION_ARGS)
 	jtimestamptz_check_range(result);
 	PG_RETURN_TIMESTAMPTZ(result);
 }
+
+/* ---------------------------------------------------------------------
+ * Casts
+ *
+ * jtimestamp -> timestamp and jtimestamptz -> timestamptz are binary
+ * coercions (WITHOUT FUNCTION, no code here): every stored value is a valid
+ * core value. Every cast INTO a Jalali type that can produce a value outside
+ * the Jalali range runs its result through the range check; the casts out of a
+ * Jalali type into jdate need none, because a valid value always lies within
+ * the Jalali days (for jtimestamptz, in every session zone: that is what the
+ * safe range is for).
+ * ------------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(timestamp_jtimestamp);
+Datum
+timestamp_jtimestamp(PG_FUNCTION_ARGS)
+{
+	Timestamp	value = PG_GETARG_TIMESTAMP(0);
+
+	jtimestamp_check_range(value);
+	PG_RETURN_TIMESTAMP(value);
+}
+
+PG_FUNCTION_INFO_V1(timestamptz_jtimestamptz);
+Datum
+timestamptz_jtimestamptz(PG_FUNCTION_ARGS)
+{
+	TimestampTz value = PG_GETARG_TIMESTAMPTZ(0);
+
+	jtimestamptz_check_range(value);
+	PG_RETURN_TIMESTAMPTZ(value);
+}
+
+/* date -> jtimestamp: core's date_timestamp, then the range check. */
+PG_FUNCTION_INFO_V1(date_jtimestamp);
+Datum
+date_jtimestamp(PG_FUNCTION_ARGS)
+{
+	Timestamp	result = DatumGetTimestamp(DirectFunctionCall1(date_timestamp,
+															   PG_GETARG_DATUM(0)));
+
+	jtimestamp_check_range(result);
+	PG_RETURN_TIMESTAMP(result);
+}
+
+/*
+ * date -> jtimestamptz: local midnight of the day in the session zone (core's
+ * date_timestamptz), then the safe-range check. A date inside the Jalali range
+ * can still fail: the local midnight of the first or last Jalali day, or of a
+ * neighbour, can lie within 16 hours of the range's ends.
+ */
+PG_FUNCTION_INFO_V1(date_jtimestamptz);
+Datum
+date_jtimestamptz(PG_FUNCTION_ARGS)
+{
+	TimestampTz result = DatumGetTimestampTz(DirectFunctionCall1(date_timestamptz,
+																 PG_GETARG_DATUM(0)));
+
+	jtimestamptz_check_range(result);
+	PG_RETURN_TIMESTAMPTZ(result);
+}
+
+/*
+ * jtimestamp <-> jtimestamptz: core's conversions through the session zone,
+ * then the check on the result. Both directions are checked: a valid
+ * jtimestamp can fall outside the safe range as an instant, and the check
+ * after jtimestamptz -> jtimestamp is the same predicate as a safety net (the
+ * safe range already guarantees it passes).
+ */
+PG_FUNCTION_INFO_V1(jtimestamp_jtimestamptz);
+Datum
+jtimestamp_jtimestamptz(PG_FUNCTION_ARGS)
+{
+	TimestampTz result = DatumGetTimestampTz(DirectFunctionCall1(timestamp_timestamptz,
+																 PG_GETARG_DATUM(0)));
+
+	jtimestamptz_check_range(result);
+	PG_RETURN_TIMESTAMPTZ(result);
+}
+
+PG_FUNCTION_INFO_V1(jtimestamptz_jtimestamp);
+Datum
+jtimestamptz_jtimestamp(PG_FUNCTION_ARGS)
+{
+	Timestamp	result = DatumGetTimestamp(DirectFunctionCall1(timestamptz_timestamp,
+															   PG_GETARG_DATUM(0)));
+
+	jtimestamp_check_range(result);
+	PG_RETURN_TIMESTAMP(result);
+}
+
+/*
+ * jdate -> jtimestamp: midnight of the day. A jdate is always inside the
+ * Jalali range, and so is the start of its day, so there is nothing to check.
+ */
+PG_FUNCTION_INFO_V1(jdate_jtimestamp);
+Datum
+jdate_jtimestamp(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall1(date_timestamp, PG_GETARG_DATUM(0));
+}
+
+/* jdate -> jtimestamptz: as date_jtimestamptz, local midnight needs the check. */
+PG_FUNCTION_INFO_V1(jdate_jtimestamptz);
+Datum
+jdate_jtimestamptz(PG_FUNCTION_ARGS)
+{
+	TimestampTz result = DatumGetTimestampTz(DirectFunctionCall1(date_timestamptz,
+																 PG_GETARG_DATUM(0)));
+
+	jtimestamptz_check_range(result);
+	PG_RETURN_TIMESTAMPTZ(result);
+}
+
+/*
+ * jtimestamp -> jdate and jtimestamptz -> jdate: core's conversions (the latter
+ * in the session zone). A valid value lies on a Jalali day, so no check.
+ */
+PG_FUNCTION_INFO_V1(jtimestamp_jdate);
+Datum
+jtimestamp_jdate(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall1(timestamp_date, PG_GETARG_DATUM(0));
+}
+
+PG_FUNCTION_INFO_V1(jtimestamptz_jdate);
+Datum
+jtimestamptz_jdate(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall1(timestamptz_date, PG_GETARG_DATUM(0));
+}
+
+/*
+ * The typmod ("scale") casts jtimestamp(p) and jtimestamptz(p): core's
+ * timestamp_scale / timestamptz_scale round to p fractional digits (they use
+ * the first two arguments; the third, "explicit", does not matter), then the
+ * range is checked again: rounding up the last microseconds of the range goes
+ * to the first instant outside it.
+ */
+PG_FUNCTION_INFO_V1(jtimestamp_scale);
+Datum
+jtimestamp_scale(PG_FUNCTION_ARGS)
+{
+	Timestamp	result = DatumGetTimestamp(DirectFunctionCall2(timestamp_scale,
+															   PG_GETARG_DATUM(0),
+															   PG_GETARG_DATUM(1)));
+
+	jtimestamp_check_range(result);
+	PG_RETURN_TIMESTAMP(result);
+}
+
+PG_FUNCTION_INFO_V1(jtimestamptz_scale);
+Datum
+jtimestamptz_scale(PG_FUNCTION_ARGS)
+{
+	TimestampTz result = DatumGetTimestampTz(DirectFunctionCall2(timestamptz_scale,
+																 PG_GETARG_DATUM(0),
+																 PG_GETARG_DATUM(1)));
+
+	jtimestamptz_check_range(result);
+	PG_RETURN_TIMESTAMPTZ(result);
+}
