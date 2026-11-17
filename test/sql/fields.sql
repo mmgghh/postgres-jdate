@@ -188,3 +188,62 @@ SELECT jdate_part('hour', 'infinity'::jdate) IS NULL AS hour_inf_null,
        jdate_part('second', '-infinity'::jdate) IS NULL AS second_ninf_null,
        jdate_part('hour', '1403-05-15'::jdate) AS hour_finite;
 SELECT jdate_part('week', 'infinity'::jdate);
+
+-- the unit is decoded once per call site and cached; feed varying units from a
+-- table column (same call site, rows evaluated in n order) to prove the cache
+-- never returns a stale field: repeats, case changes, switches back and forth
+CREATE TEMP TABLE unit_seq (n int, u text, j jdate);
+INSERT INTO unit_seq
+SELECT n, u, '1403-05-15'::jdate
+FROM unnest(ARRAY['year', 'year', 'YEAR', 'Month', 'month', 'month', 'MONTH',
+                  'day', 'Day', 'year', 'quarter', 'doy', 'quarter', 'quarter',
+                  'epoch', 'dow', 'isodow', 'Decade', 'century', 'year'])
+     WITH ORDINALITY AS t(u, n);
+CREATE TEMP TABLE unit_ref (u text, part bigint, ext numeric);
+INSERT INTO unit_ref VALUES
+  ('year',    jdate_part('year'::text, '1403-05-15'::jdate),    pg_catalog.extract('year'::text, '1403-05-15'::jdate)),
+  ('month',   jdate_part('month'::text, '1403-05-15'::jdate),   pg_catalog.extract('month'::text, '1403-05-15'::jdate)),
+  ('day',     jdate_part('day'::text, '1403-05-15'::jdate),     pg_catalog.extract('day'::text, '1403-05-15'::jdate)),
+  ('quarter', jdate_part('quarter'::text, '1403-05-15'::jdate), pg_catalog.extract('quarter'::text, '1403-05-15'::jdate)),
+  ('doy',     jdate_part('doy'::text, '1403-05-15'::jdate),     pg_catalog.extract('doy'::text, '1403-05-15'::jdate)),
+  ('epoch',   jdate_part('epoch'::text, '1403-05-15'::jdate),   pg_catalog.extract('epoch'::text, '1403-05-15'::jdate)),
+  ('dow',     jdate_part('dow'::text, '1403-05-15'::jdate),     pg_catalog.extract('dow'::text, '1403-05-15'::jdate)),
+  ('isodow',  jdate_part('isodow'::text, '1403-05-15'::jdate),  pg_catalog.extract('isodow'::text, '1403-05-15'::jdate)),
+  ('decade',  jdate_part('decade'::text, '1403-05-15'::jdate),  pg_catalog.extract('decade'::text, '1403-05-15'::jdate)),
+  ('century', jdate_part('century'::text, '1403-05-15'::jdate), pg_catalog.extract('century'::text, '1403-05-15'::jdate));
+SELECT s.n, s.u,
+       s.part, s.part = r.part AS part_ok,
+       s.ext, s.ext = r.ext AS extract_ok
+FROM (SELECT n, u, jdate_part(u, j) AS part, pg_catalog.extract(u, j) AS ext
+      FROM (SELECT * FROM unit_seq ORDER BY n OFFSET 0) q) s
+JOIN unit_ref r ON r.u = lower(s.u)
+ORDER BY s.n;
+
+-- jdate_trunc has its own cache
+SELECT n, u, jdate_trunc(u, j) AS trunc
+FROM (SELECT * FROM unit_seq WHERE lower(u) IN ('year', 'month', 'day', 'quarter')
+      ORDER BY n OFFSET 0) q
+ORDER BY n;
+
+-- an invalid unit in the middle of the stream raises its error, and the units
+-- after it are still decoded correctly (one call site inside the function)
+CREATE FUNCTION unit_probe(u text) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN jdate_part(u, '1403-05-15'::jdate)::text || '/' ||
+         pg_catalog.extract(u, '1403-05-15'::jdate)::text;
+EXCEPTION WHEN invalid_parameter_value OR feature_not_supported THEN
+  RETURN 'error ' || SQLSTATE;
+END $$;
+CREATE FUNCTION unit_probe_trunc(u text) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN jdate_trunc(u, '1403-05-15'::jdate)::text;
+EXCEPTION WHEN invalid_parameter_value OR feature_not_supported THEN
+  RETURN 'error ' || SQLSTATE;
+END $$;
+SELECT n, u, unit_probe(u) AS probe, unit_probe_trunc(u) AS probe_trunc
+FROM unnest(ARRAY['month', 'month', 'bogus', 'month', 'Year', 'YEAR', 'yeer',
+                  'year', 'week', 'day', 'hour', 'day', '', 'day', 'MONTH',
+                  'a_unit_name_longer_than_the_cache_buffer',
+                  'month', 'Month'])
+     WITH ORDINALITY AS t(u, n)
+ORDER BY n;

@@ -533,7 +533,7 @@ jdate_from_epoch(PG_FUNCTION_ARGS)
  * ------------------------------------------------------------------- */
 
 static int
-jdate_decode_field(text *units)
+jdate_decode_field_uncached(text *units)
 {
 	char	   *lowunits;
 	int			type,
@@ -555,6 +555,52 @@ jdate_decode_field(text *units)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unit \"%s\" not recognized for type jdate", lowunits)));
+	return val;
+}
+
+/*
+ * Per call site cache of the last decoded unit, kept in fn_extra (allocated
+ * in fn_mcxt). The raw bytes are compared with memcmp, so a different
+ * spelling, case or value is always a miss and goes through the full decoder.
+ * Only successful decodes are stored; an invalid unit raises an error before
+ * the cache is touched. Units longer than the buffer are never cached.
+ */
+#define JDATE_UNIT_CACHE_MAX 32
+
+typedef struct JdateUnitCache
+{
+	int			len;
+	int			val;
+	char		bytes[JDATE_UNIT_CACHE_MAX];
+} JdateUnitCache;
+
+static int
+jdate_decode_field(FunctionCallInfo fcinfo, text *units)
+{
+	FmgrInfo   *flinfo = fcinfo->flinfo;
+	JdateUnitCache *cache;
+	int			len = VARSIZE_ANY_EXHDR(units);
+	int			val;
+
+	if (flinfo == NULL || len > JDATE_UNIT_CACHE_MAX)
+		return jdate_decode_field_uncached(units);
+
+	cache = (JdateUnitCache *) flinfo->fn_extra;
+	if (cache != NULL && cache->len == len &&
+		memcmp(cache->bytes, VARDATA_ANY(units), len) == 0)
+		return cache->val;
+
+	val = jdate_decode_field_uncached(units);
+
+	if (cache == NULL)
+	{
+		cache = (JdateUnitCache *) MemoryContextAlloc(flinfo->fn_mcxt,
+													  sizeof(JdateUnitCache));
+		flinfo->fn_extra = cache;
+	}
+	cache->len = len;
+	cache->val = val;
+	memcpy(cache->bytes, VARDATA_ANY(units), len);
 	return val;
 }
 
@@ -692,7 +738,7 @@ jdate_part(PG_FUNCTION_ARGS)
 {
 	text	   *units = PG_GETARG_TEXT_PP(0);
 	DateADT		value = PG_GETARG_DATEADT(1);
-	int			val = jdate_decode_field(units);
+	int			val = jdate_decode_field(fcinfo, units);
 	bool		isnull;
 	double		result = jdate_get_field(value, val, &isnull);
 
@@ -707,7 +753,7 @@ jdate_extract(PG_FUNCTION_ARGS)
 {
 	text	   *units = PG_GETARG_TEXT_PP(0);
 	DateADT		value = PG_GETARG_DATEADT(1);
-	int			val = jdate_decode_field(units);
+	int			val = jdate_decode_field(fcinfo, units);
 	bool		isnull;
 	double		result = jdate_get_field(value, val, &isnull);
 
@@ -722,7 +768,7 @@ jdate_trunc(PG_FUNCTION_ARGS)
 {
 	text	   *units = PG_GETARG_TEXT_PP(0);
 	DateADT		value = PG_GETARG_DATEADT(1);
-	int			val = jdate_decode_field(units);
+	int			val = jdate_decode_field(fcinfo, units);
 	JalaaliDate jd;
 	int			jdn;
 

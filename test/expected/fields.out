@@ -457,3 +457,123 @@ SELECT jdate_part('hour', 'infinity'::jdate) IS NULL AS hour_inf_null,
 
 SELECT jdate_part('week', 'infinity'::jdate);
 ERROR:  unit not supported for jdate_part/extract
+-- the unit is decoded once per call site and cached; feed varying units from a
+-- table column (same call site, rows evaluated in n order) to prove the cache
+-- never returns a stale field: repeats, case changes, switches back and forth
+CREATE TEMP TABLE unit_seq (n int, u text, j jdate);
+INSERT INTO unit_seq
+SELECT n, u, '1403-05-15'::jdate
+FROM unnest(ARRAY['year', 'year', 'YEAR', 'Month', 'month', 'month', 'MONTH',
+                  'day', 'Day', 'year', 'quarter', 'doy', 'quarter', 'quarter',
+                  'epoch', 'dow', 'isodow', 'Decade', 'century', 'year'])
+     WITH ORDINALITY AS t(u, n);
+CREATE TEMP TABLE unit_ref (u text, part bigint, ext numeric);
+INSERT INTO unit_ref VALUES
+  ('year',    jdate_part('year'::text, '1403-05-15'::jdate),    pg_catalog.extract('year'::text, '1403-05-15'::jdate)),
+  ('month',   jdate_part('month'::text, '1403-05-15'::jdate),   pg_catalog.extract('month'::text, '1403-05-15'::jdate)),
+  ('day',     jdate_part('day'::text, '1403-05-15'::jdate),     pg_catalog.extract('day'::text, '1403-05-15'::jdate)),
+  ('quarter', jdate_part('quarter'::text, '1403-05-15'::jdate), pg_catalog.extract('quarter'::text, '1403-05-15'::jdate)),
+  ('doy',     jdate_part('doy'::text, '1403-05-15'::jdate),     pg_catalog.extract('doy'::text, '1403-05-15'::jdate)),
+  ('epoch',   jdate_part('epoch'::text, '1403-05-15'::jdate),   pg_catalog.extract('epoch'::text, '1403-05-15'::jdate)),
+  ('dow',     jdate_part('dow'::text, '1403-05-15'::jdate),     pg_catalog.extract('dow'::text, '1403-05-15'::jdate)),
+  ('isodow',  jdate_part('isodow'::text, '1403-05-15'::jdate),  pg_catalog.extract('isodow'::text, '1403-05-15'::jdate)),
+  ('decade',  jdate_part('decade'::text, '1403-05-15'::jdate),  pg_catalog.extract('decade'::text, '1403-05-15'::jdate)),
+  ('century', jdate_part('century'::text, '1403-05-15'::jdate), pg_catalog.extract('century'::text, '1403-05-15'::jdate));
+SELECT s.n, s.u,
+       s.part, s.part = r.part AS part_ok,
+       s.ext, s.ext = r.ext AS extract_ok
+FROM (SELECT n, u, jdate_part(u, j) AS part, pg_catalog.extract(u, j) AS ext
+      FROM (SELECT * FROM unit_seq ORDER BY n OFFSET 0) q) s
+JOIN unit_ref r ON r.u = lower(s.u)
+ORDER BY s.n;
+ n  |    u    |    part    | part_ok |    ext     | extract_ok 
+----+---------+------------+---------+------------+------------
+  1 | year    |       1403 | t       |       1403 | t
+  2 | year    |       1403 | t       |       1403 | t
+  3 | YEAR    |       1403 | t       |       1403 | t
+  4 | Month   |          5 | t       |          5 | t
+  5 | month   |          5 | t       |          5 | t
+  6 | month   |          5 | t       |          5 | t
+  7 | MONTH   |          5 | t       |          5 | t
+  8 | day     |         15 | t       |         15 | t
+  9 | Day     |         15 | t       |         15 | t
+ 10 | year    |       1403 | t       |       1403 | t
+ 11 | quarter |          2 | t       |          2 | t
+ 12 | doy     |        139 | t       |        139 | t
+ 13 | quarter |          2 | t       |          2 | t
+ 14 | quarter |          2 | t       |          2 | t
+ 15 | epoch   | 1722816000 | t       | 1722816000 | t
+ 16 | dow     |          2 | t       |          2 | t
+ 17 | isodow  |          1 | t       |          1 | t
+ 18 | Decade  |        140 | t       |        140 | t
+ 19 | century |         15 | t       |         15 | t
+ 20 | year    |       1403 | t       |       1403 | t
+(20 rows)
+
+-- jdate_trunc has its own cache
+SELECT n, u, jdate_trunc(u, j) AS trunc
+FROM (SELECT * FROM unit_seq WHERE lower(u) IN ('year', 'month', 'day', 'quarter')
+      ORDER BY n OFFSET 0) q
+ORDER BY n;
+ n  |    u    |   trunc    
+----+---------+------------
+  1 | year    | 1403-01-01
+  2 | year    | 1403-01-01
+  3 | YEAR    | 1403-01-01
+  4 | Month   | 1403-05-01
+  5 | month   | 1403-05-01
+  6 | month   | 1403-05-01
+  7 | MONTH   | 1403-05-01
+  8 | day     | 1403-05-15
+  9 | Day     | 1403-05-15
+ 10 | year    | 1403-01-01
+ 11 | quarter | 1403-04-01
+ 13 | quarter | 1403-04-01
+ 14 | quarter | 1403-04-01
+ 20 | year    | 1403-01-01
+(14 rows)
+
+-- an invalid unit in the middle of the stream raises its error, and the units
+-- after it are still decoded correctly (one call site inside the function)
+CREATE FUNCTION unit_probe(u text) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN jdate_part(u, '1403-05-15'::jdate)::text || '/' ||
+         pg_catalog.extract(u, '1403-05-15'::jdate)::text;
+EXCEPTION WHEN invalid_parameter_value OR feature_not_supported THEN
+  RETURN 'error ' || SQLSTATE;
+END $$;
+CREATE FUNCTION unit_probe_trunc(u text) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN jdate_trunc(u, '1403-05-15'::jdate)::text;
+EXCEPTION WHEN invalid_parameter_value OR feature_not_supported THEN
+  RETURN 'error ' || SQLSTATE;
+END $$;
+SELECT n, u, unit_probe(u) AS probe, unit_probe_trunc(u) AS probe_trunc
+FROM unnest(ARRAY['month', 'month', 'bogus', 'month', 'Year', 'YEAR', 'yeer',
+                  'year', 'week', 'day', 'hour', 'day', '', 'day', 'MONTH',
+                  'a_unit_name_longer_than_the_cache_buffer',
+                  'month', 'Month'])
+     WITH ORDINALITY AS t(u, n)
+ORDER BY n;
+ n  |                    u                     |    probe    | probe_trunc 
+----+------------------------------------------+-------------+-------------
+  1 | month                                    | 5/5         | 1403-05-01
+  2 | month                                    | 5/5         | 1403-05-01
+  3 | bogus                                    | error 22023 | error 22023
+  4 | month                                    | 5/5         | 1403-05-01
+  5 | Year                                     | 1403/1403   | 1403-01-01
+  6 | YEAR                                     | 1403/1403   | 1403-01-01
+  7 | yeer                                     | error 22023 | error 22023
+  8 | year                                     | 1403/1403   | 1403-01-01
+  9 | week                                     | error 0A000 | error 0A000
+ 10 | day                                      | 15/15       | 1403-05-15
+ 11 | hour                                     | 0/0         | error 0A000
+ 12 | day                                      | 15/15       | 1403-05-15
+ 13 |                                          | error 22023 | error 22023
+ 14 | day                                      | 15/15       | 1403-05-15
+ 15 | MONTH                                    | 5/5         | 1403-05-01
+ 16 | a_unit_name_longer_than_the_cache_buffer | error 22023 | error 22023
+ 17 | month                                    | 5/5         | 1403-05-01
+ 18 | Month                                    | 5/5         | 1403-05-01
+(18 rows)
+
