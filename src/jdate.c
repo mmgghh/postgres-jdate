@@ -492,18 +492,24 @@ timestamptz_jdate(PG_FUNCTION_ARGS)
  * Validate a finite epoch and floor it to whole seconds. Shared by both
  * to_jdate variants so they reject exactly the same inputs.
  */
+static bool
+jdate_epoch_in_range(float8 epoch)
+{
+	/*
+	 * The bounds are the epochs of the first instant of the first supported
+	 * day and of the first instant after the last one: exact doubles
+	 * (multiples of 86400, far below 2^53). The test is written negated so
+	 * that NaN fails it too.
+	 */
+	return epoch >= (double) (jalaali_min_jdn() - UNIX_EPOCH_JDATE) * SECS_PER_DAY &&
+		epoch < (double) (jalaali_max_jdn() - UNIX_EPOCH_JDATE + 1) * SECS_PER_DAY;
+}
+
 static int64
 jdate_epoch_secs(float8 epoch)
 {
-	/*
-	 * Reject anything outside the Jalali range before narrowing the double to
-	 * an integer. The bounds are the epochs of the first instant of the first
-	 * supported day and of the first instant after the last one: exact
-	 * doubles (multiples of 86400, far below 2^53). The test is written
-	 * negated so that NaN fails it too.
-	 */
-	if (!(epoch >= (double) (jalaali_min_jdn() - UNIX_EPOCH_JDATE) * SECS_PER_DAY &&
-		  epoch < (double) (jalaali_max_jdn() - UNIX_EPOCH_JDATE + 1) * SECS_PER_DAY))
+	/* Reject anything outside the Jalali range before narrowing to integer. */
+	if (!jdate_epoch_in_range(epoch))
 		jdate_range_error();
 
 	return (int64) floor(epoch);
@@ -542,7 +548,10 @@ jdate_from_epoch(PG_FUNCTION_ARGS)
  * to_jdate(double precision, text) -- like to_jdate(epoch), but the day is
  * the calendar day in the named time zone instead of in UTC.
  *
- * The epoch is validated exactly as above, turned into a timestamptz, moved
+ * The zone is validated first, whatever the epoch is: an unknown zone is
+ * core's error even for +/-Infinity, NaN and out-of-range epochs, so the
+ * result never depends on which argument is bad. The epoch is then validated
+ * exactly as above, turned into a timestamptz, moved
  * to local time with core's timestamptz_zone (the function behind
  * timezone(text, timestamptz) / AT TIME ZONE, so zone names, abbreviations,
  * POSIX specs and the "time zone ... not recognized" error are all core's),
@@ -560,6 +569,17 @@ jdate_from_epoch_zone(PG_FUNCTION_ARGS)
 	TimestampTz ts;
 	Timestamp	local;
 	DateADT		result;
+
+	/*
+	 * An in-range epoch validates the zone in the conversion below. For the
+	 * others (infinity, NaN, out of range) convert an arbitrary finite
+	 * instant first: core's timestamptz_zone short-circuits infinite
+	 * timestamps before it looks at the zone, so it needs a finite one.
+	 */
+	if (!jdate_epoch_in_range(epoch))
+		(void) DirectFunctionCall2(timestamptz_zone,
+								   PointerGetDatum(zone),
+								   TimestampTzGetDatum((TimestampTz) 0));
 
 	if (isinf(epoch))
 		PG_RETURN_DATEADT(epoch < 0 ? DATEVAL_NOBEGIN : DATEVAL_NOEND);

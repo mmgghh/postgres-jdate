@@ -356,15 +356,15 @@ instead: the instant is converted to local time in `zone` by core's
 range-checked. The session `TimeZone` plays no part. It is `IMMUTABLE`, `STRICT`
 and `PARALLEL SAFE`, the same as core's `timezone(text, timestamptz)` in
 `pg_catalog` (checked in `pg_proc`; the `tz_casts` test compares them). Order of
-checks: `NaN` and an epoch outside the range above are `22008` first, judged on
-the UTC instant, before the zone is used; so the first second of `-0061-01-01`
+checks: the zone is looked up first, so an unknown zone raises core's `22023`
+(`time zone "..." not recognized`) for every epoch, including `±Infinity`, `NaN`
+and epochs outside the range. With a valid zone, `±Infinity` gives `±infinity`;
+`NaN` and an epoch outside the range above are `22008`, judged on the UTC
+instant, before the zone is applied; so the first second of `-0061-01-01`
 UTC fails in `America/New_York` (its local day is before the range) and the
 last second of `3177-12-29` UTC fails in `Pacific/Kiritimati` (UTC+14, its
 local day is after the range), and a finite epoch just outside the range fails
-even where the local day would fit. `±Infinity` gives `±infinity` before the
-zone is looked up, so it succeeds even for a zone name that does not exist; for
-a finite epoch an unknown zone raises core's `22023`
-(`time zone "..." not recognized`). A `NULL` argument gives `NULL`. For
+even where the local day would fit. A `NULL` argument gives `NULL`. For
 ordinary instants it agrees with `(to_timestamp(e) AT TIME ZONE zone)::date`
 converted to `jdate` (the `tz_casts` test compares them over a year in five zones).
 

@@ -575,7 +575,6 @@ SELECT to_jdate('Infinity'::float8, 'Asia/Tehran') AS inf,
        to_jdate('-Infinity'::float8, 'America/New_York') AS ninf,
        to_jdate(1710892800, NULL) IS NULL AS null_zone,
        to_jdate(NULL::float8, 'UTC') IS NULL AS null_epoch;
-SELECT to_jdate('Infinity'::float8, 'No/Such_Zone') AS inf_skips_zone_check;
 
 -- range edges: the epoch is checked exactly like the one-argument version,
 -- then the LOCAL day is checked too
@@ -596,8 +595,18 @@ SELECT to_jdate(9.3e18, 'UTC') IS NOT NULL AS beyond_int64;
 -- unknown zones raise core's error (22023), whatever the epoch
 SELECT to_jdate(1710892800, 'No/Such_Zone') IS NOT NULL AS unknown_zone;
 SELECT to_jdate(1710892800, '') IS NOT NULL AS empty_zone;
+
+-- the zone is validated first, so it is an error for infinity too (a good
+-- zone still returns infinity, tested above), and for NaN and out-of-range
+-- epochs, which would otherwise be 22008
+SELECT to_jdate('Infinity'::float8, 'No/Such_Zone') IS NOT NULL AS inf_unknown_zone;
+SELECT to_jdate('-Infinity'::float8, 'No/Such_Zone') IS NOT NULL AS ninf_unknown_zone;
+SELECT to_jdate('Infinity'::float8, '') IS NOT NULL AS inf_empty_zone;
+SELECT to_jdate('NaN'::float8, 'No/Such_Zone') IS NOT NULL AS nan_unknown_zone;
+SELECT to_jdate(1e300, 'No/Such_Zone') IS NOT NULL AS huge_unknown_zone;
 \set VERBOSITY default
 SELECT to_jdate(1710892800, 'No/Such_Zone');
+SELECT to_jdate('Infinity'::float8, 'No/Such_Zone');
 
 -- volatility copied from core's timezone(text, timestamptz)
 SELECT p.provolatile = c.provolatile AS same_volatility,

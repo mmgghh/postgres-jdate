@@ -207,8 +207,9 @@ SELECT to_jdate(1710885600, 'America/New_York');             -- 1402-12-29
 SELECT to_timestamp(1710885600)::jdate;                      -- 1403-01-01 (the session zone is Asia/Tehran)
 SELECT to_jdate(1710885600, 'Asia/Tehran') = to_timestamp(1710885600)::jdate;  -- t
 
--- an unknown zone is core's error (SQLSTATE 22023); infinity needs no zone
+-- an unknown zone is core's error (SQLSTATE 22023), even for infinity
 SELECT to_jdate(1710885600, 'No/Such_Zone');                 -- ERROR: time zone "No/Such_Zone" not recognized
+SELECT to_jdate('infinity', 'No/Such_Zone');                 -- ERROR: time zone "No/Such_Zone" not recognized
 SELECT to_jdate('infinity', 'Asia/Tehran');                  -- infinity
 
 -- epochs never depend on the zone: an instant has one epoch, a jdate's epoch
