@@ -1,5 +1,7 @@
 MODULE_big = jdate
-OBJS = src/jalaali.o src/jdate.o
+# Every src/*.c except the standalone test program, so a new source file needs
+# no edit here. dev/test-cluster.sh (cmd_build) compiles the same set.
+OBJS = $(patsubst %.c,%.o,$(filter-out src/test_jalaali.c,$(wildcard src/*.c)))
 EXTENSION = jdate
 DATA = jdate--1.0.sql
 DOCS = README.md

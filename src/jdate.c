@@ -13,16 +13,15 @@
 #include "datatype/timestamp.h"
 
 #include "jalaali.h"
+#include "jdate_common.h"
 
 PG_MODULE_MAGIC;
 
 /*
- * The one error for "this day is outside the supported Jalali range", shared
- * by display (jdate_to_jalaali) and by every path that produces a jdate
- * (jdate_check_range), so no out-of-range value can be stored and then fail
- * on every later read.
+ * See jdate_common.h. Shared by display (jdate_to_jalaali) and by every range
+ * check (jdate_check_range and its relatives).
  */
-static void
+void
 jdate_range_error(void)
 {
 	ereport(ERROR,
@@ -31,74 +30,9 @@ jdate_range_error(void)
 					JALAALI_MIN_YEAR, JALAALI_MAX_YEAR)));
 }
 
-/*
- * Raise 22008 unless a finite value lies within the Jalali range. Infinity
- * and -infinity are always valid.
- */
-static void
-jdate_check_range(DateADT value)
-{
-	if (DATE_NOT_FINITE(value))
-		return;
-
-	if (value < jalaali_min_jdn() - POSTGRES_EPOCH_JDATE ||
-		value > jalaali_max_jdn() - POSTGRES_EPOCH_JDATE)
-		jdate_range_error();
-}
-
-/*
- * The text of a Jalali date, shared by jdate_out and jdate_format so the two
- * cannot disagree: an optional "-", then the year as exactly four digits, then
- * "-MM-DD". A plain %04d would pad the sign into the width ("-061" rather
- * than "-0061"), so the magnitude is padded instead.
- */
-static char *
-jdate_format_ymd(const JalaaliDate *jd)
-{
-	return psprintf("%s%04d-%02d-%02d", jd->jy < 0 ? "-" : "",
-					abs(jd->jy), jd->jm, jd->jd);
-}
-
-/*
- * The text of an infinite day, shared by jdate_out and jdate_format. The
- * caller has checked DATE_NOT_FINITE(value).
- */
-static const char *
-jdate_infinity_text(DateADT value)
-{
-	return DATE_IS_NOBEGIN(value) ? "-infinity" : "infinity";
-}
-
-static JalaaliDate
-jdate_to_jalaali(DateADT value)
-{
-	JalaaliDate jd;
-
-	if (DATE_NOT_FINITE(value))
-		ereport(ERROR,
-				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-				 errmsg("cannot convert infinite jdate to a calendar date")));
-
-	if (!jalaali_from_jdn(value + POSTGRES_EPOCH_JDATE, &jd))
-		jdate_range_error();
-
-	return jd;
-}
-
 /* ---------------------------------------------------------------------
  * Text I/O
  * ------------------------------------------------------------------- */
-
-/*
- * Outcome of parsing one "Y-M-D" string, so that jdate_in has a single place
- * per error kind to report it from.
- */
-typedef enum JdateParseStatus
-{
-	JDATE_PARSE_OK,
-	JDATE_PARSE_SYNTAX,			/* not of the form Y-M-D */
-	JDATE_PARSE_OVERFLOW		/* a field does not fit in an int32 */
-} JdateParseStatus;
 
 static const char *
 jdate_skip_space(const char *s)
@@ -156,12 +90,14 @@ jdate_scan_int(const char **ptr, int *result)
 }
 
 /*
- * Parse "Y-M-D" into three ints. The grammar is what the sscanf format
- * " %d - %d - %d " accepted: whitespace may surround the string and each
- * dash, and each field may carry a sign.
+ * Scan "Y-M-D" at the start of str into three ints and set *end just past the
+ * day field (see jdate_common.h). The grammar is what the sscanf format
+ * " %d - %d - %d " accepted: whitespace may precede the date and surround each
+ * dash, and each field may carry a sign. What follows the day field is the
+ * caller's business, and trailing whitespace is not consumed.
  */
-static JdateParseStatus
-jdate_parse(const char *str, int *jy, int *jm, int *jd)
+JdateParseStatus
+jdate_scan_ymd(const char *str, const char **end, int *jy, int *jm, int *jd)
 {
 	const char *s = jdate_skip_space(str);
 	JdateParseStatus status;
@@ -185,11 +121,25 @@ jdate_parse(const char *str, int *jy, int *jm, int *jd)
 			overflow = true;
 	}
 
-	if (*jdate_skip_space(s) != '\0')
-		return JDATE_PARSE_SYNTAX;
+	*end = s;
+	return overflow ? JDATE_PARSE_OVERFLOW : JDATE_PARSE_OK;
+}
+
+/*
+ * Parse a whole string that is exactly "Y-M-D", with whitespace allowed around
+ * it: the scanner, then a check that nothing else follows.
+ */
+static JdateParseStatus
+jdate_parse(const char *str, int *jy, int *jm, int *jd)
+{
+	const char *end;
+	JdateParseStatus status = jdate_scan_ymd(str, &end, jy, jm, jd);
 
 	/* A syntax error anywhere outranks an overflow, as with the old sscanf. */
-	return overflow ? JDATE_PARSE_OVERFLOW : JDATE_PARSE_OK;
+	if (status == JDATE_PARSE_SYNTAX || *jdate_skip_space(end) != '\0')
+		return JDATE_PARSE_SYNTAX;
+
+	return status;
 }
 
 PG_FUNCTION_INFO_V1(jdate_in);
@@ -604,7 +554,7 @@ jdate_from_epoch_zone(PG_FUNCTION_ARGS)
  * jdate_part / extract / jdate_trunc
  * ------------------------------------------------------------------- */
 
-static int
+int
 jdate_decode_field_uncached(text *units)
 {
 	char	   *lowunits;
@@ -631,22 +581,10 @@ jdate_decode_field_uncached(text *units)
 }
 
 /*
- * Per call site cache of the last decoded unit, kept in fn_extra (allocated
- * in fn_mcxt). The raw bytes are compared with memcmp, so a different
- * spelling, case or value is always a miss and goes through the full decoder.
- * Only successful decodes are stored; an invalid unit raises an error before
- * the cache is touched. Units longer than the buffer are never cached.
+ * Per call site cache of the last decoded unit: see JdateUnitCache in
+ * jdate_common.h.
  */
-#define JDATE_UNIT_CACHE_MAX 32
-
-typedef struct JdateUnitCache
-{
-	int			len;
-	int			val;
-	char		bytes[JDATE_UNIT_CACHE_MAX];
-} JdateUnitCache;
-
-static int
+int
 jdate_decode_field(FunctionCallInfo fcinfo, text *units)
 {
 	FmgrInfo   *flinfo = fcinfo->flinfo;
@@ -676,24 +614,13 @@ jdate_decode_field(FunctionCallInfo fcinfo, text *units)
 	return val;
 }
 
-static void
+void
 jdate_unsupported_unit(void)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("unit not supported for jdate_part/extract")));
 }
-
-/*
- * What a field of a jdate is: a finite integer, an infinite value (only for an
- * infinite jdate and a unit that only grows), or NULL.
- */
-typedef enum JdateFieldKind
-{
-	JDATE_FIELD_FINITE,
-	JDATE_FIELD_INFINITE,		/* *result is -1 (-Infinity) or +1 (Infinity) */
-	JDATE_FIELD_NULL
-} JdateFieldKind;
 
 /*
  * The field of an infinite jdate, decided before any Jalali conversion (there
@@ -737,9 +664,9 @@ jdate_get_infinite_field(DateADT value, int val, int64 *result)
 
 /*
  * Field "val" of a jdate as an exact int64 in *result, with the kind telling
- * whether it is a finite value, an infinity or NULL.
+ * whether it is a finite value, an infinity or NULL (see jdate_common.h).
  */
-static JdateFieldKind
+JdateFieldKind
 jdate_get_field(DateADT value, int val, int64 *result)
 {
 	JalaaliDate jd;

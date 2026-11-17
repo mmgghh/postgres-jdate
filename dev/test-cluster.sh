@@ -94,9 +94,18 @@ cmd_stop() {
 cmd_build() {
 	local hdr="$HEADERS/usr/include/postgresql/18/server"
 	local internal="$HEADERS/usr/include/postgresql/internal"
+	# Same set as the Makefile's OBJS: every src/*.c except the standalone
+	# test program, so a new source file needs no edit here.
+	local -a srcs=()
+	local f
+	for f in "$ROOT"/src/*.c; do
+		if [ "$(basename "$f")" != test_jalaali.c ]; then
+			srcs+=("$f")
+		fi
+	done
 	gcc -Wall -Wextra -fPIC -shared -O2 \
 		-I"$hdr" -I"$internal" -I"$ROOT/src" \
-		-o "$EXTDIR/jdate.so" "$ROOT/src/jalaali.c" "$ROOT/src/jdate.c"
+		-o "$EXTDIR/jdate.so" "${srcs[@]}"
 	cp "$ROOT/jdate--1.0.sql" "$EXTDIR/extension/jdate--1.0.sql"
 	sed "s/^module_pathname.*/module_pathname = 'jdate'/" \
 		"$ROOT/jdate.control" > "$EXTDIR/extension/jdate.control"
