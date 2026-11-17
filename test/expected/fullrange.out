@@ -1,0 +1,248 @@
+-- Exhaustive test over the whole supported range: all 1,183,020 days from
+-- -0061-01-01 to 3177-12-29. Every check reports a count of violations (0) or
+-- a single boolean, so the output is deterministic and has no row dumps.
+-- The checks cross-check the Jalali conversion against core's Gregorian
+-- machinery (date, date_part, date_send) rather than against jalaali.c's own
+-- Gregorian code, so a bug in the conversion cannot cancel itself out.
+-- It passes on correct code by design; the negative controls at the end show
+-- the checks are able to fail.
+SET timezone = 'UTC';
+SET DateStyle = 'ISO, YMD';
+-- The domain really is the whole range: one day either side is rejected.
+\set VERBOSITY sqlstate
+SELECT '-0061-01-01'::jdate - 1;
+ERROR:  22008
+SELECT '3177-12-29'::jdate + 1;
+ERROR:  22008
+\set VERBOSITY default
+-- The days under test, with the Jalali fields from jdate_part and the
+-- Gregorian fields from core's date. One row per day, g = days since
+-- -0061-01-01.
+CREATE TEMP TABLE fullrange_days AS
+SELECT s.g,
+       s.d,
+       s.d::text AS t,
+       jdate_part('year', s.d)::int AS jy,
+       jdate_part('month', s.d)::int AS jm,
+       jdate_part('day', s.d)::int AS jd,
+       s.d::date AS dt,
+       date_part('year', s.d::date)::int AS gy,
+       date_part('month', s.d::date)::int AS gm,
+       date_part('day', s.d::date)::int AS gdy
+FROM (SELECT g, '-0061-01-01'::jdate + g AS d
+      FROM generate_series(0, 1183019) AS g) AS s
+ORDER BY s.g;
+SELECT count(*) AS days,
+       min(d) AS first_day,
+       max(d) AS last_day,
+       max(d) - min(d) AS span
+FROM fullrange_days;
+  days   |  first_day  |  last_day  |  span   
+---------+-------------+------------+---------
+ 1183020 | -0061-01-01 | 3177-12-29 | 1183019
+(1 row)
+
+-- (a) text round trip, and the text is always [-]YYYY-MM-DD (the sign only
+-- for negative years; the month and day digits are checked in (e))
+SELECT count(*) AS text_roundtrip_violations
+FROM fullrange_days WHERE t::jdate <> d;
+ text_roundtrip_violations 
+---------------------------
+                         0
+(1 row)
+
+SELECT count(*) AS text_shape_violations
+FROM fullrange_days
+WHERE length(t) <> CASE WHEN jy < 0 THEN 11 ELSE 10 END
+   OR substr(t, length(t) - 5, 1) <> '-'
+   OR substr(t, length(t) - 2, 1) <> '-'
+   OR (jy < 0) <> (left(t, 1) = '-');
+ text_shape_violations 
+-----------------------
+                     0
+(1 row)
+
+-- (b) binary identity with date
+SELECT count(*) AS send_violations
+FROM fullrange_days WHERE jdate_send(d) <> date_send(dt);
+ send_violations 
+-----------------
+               0
+(1 row)
+
+-- (c) contiguity. Successive days either increment the day of the month, or
+-- roll over to day 1 of the next month from that month's last day (31 days
+-- for months 1-6, 30 for months 7-11, 29 or 30 for month 12), or roll over to
+-- 1/1 of the next year from Esfand 29/30. Month lengths are also bounded
+-- within the month, so a month cannot run long. The function takes a stride
+-- and a row limit so the negative control below can feed the same predicate
+-- a stream with gaps in it.
+CREATE FUNCTION fullrange_step_violations(stride int, lim int) RETURNS bigint
+LANGUAGE sql STABLE AS $$
+    SELECT count(*) FROM (
+        SELECT jy, jm, jd,
+               lag(jy) OVER w AS py, lag(jm) OVER w AS pm, lag(jd) OVER w AS pd
+        FROM fullrange_days
+        WHERE g < lim AND g % stride = 0
+        WINDOW w AS (ORDER BY g)
+    ) AS s
+    WHERE py IS NOT NULL
+      AND NOT (
+            jm BETWEEN 1 AND 12
+        AND jd BETWEEN 1 AND CASE WHEN jm <= 6 THEN 31 ELSE 30 END
+        AND (   (jy = py AND jm = pm AND jd = pd + 1)
+             OR (jy = py AND jm = pm + 1 AND jd = 1
+                 AND pd = CASE WHEN pm <= 6 THEN 31 ELSE 30 END)
+             OR (jy = py + 1 AND jm = 1 AND jd = 1 AND pm = 12 AND pd IN (29, 30)))
+      );
+$$;
+SELECT fullrange_step_violations(1, 1183020) AS step_violations;
+ step_violations 
+-----------------
+               0
+(1 row)
+
+-- The first and last rows start and end the range cleanly.
+SELECT (SELECT (jy, jm, jd) FROM fullrange_days WHERE g = 0) AS first_row,
+       (SELECT (jy, jm, jd) FROM fullrange_days WHERE g = 1183019) AS last_row;
+ first_row |   last_row   
+-----------+--------------
+ (-61,1,1) | (3177,12,29)
+(1 row)
+
+-- Month lengths per (year, month): every day present, day numbers start at 1.
+SELECT count(*) AS year_months,
+       count(*) FILTER (WHERE lo <> 1 OR hi <> n) AS month_gap_violations,
+       count(*) FILTER (WHERE jm <= 6 AND n <> 31) AS first_half_violations,
+       count(*) FILTER (WHERE jm BETWEEN 7 AND 11 AND n <> 30) AS second_half_violations,
+       count(*) FILTER (WHERE jm = 12 AND n NOT IN (29, 30)) AS esfand_violations
+FROM (SELECT jy, jm, count(*) AS n, min(jd) AS lo, max(jd) AS hi
+      FROM fullrange_days GROUP BY jy, jm) AS ym;
+ year_months | month_gap_violations | first_half_violations | second_half_violations | esfand_violations 
+-------------+----------------------+-----------------------+------------------------+-------------------
+       38868 |                    0 |                     0 |                      0 |                 0
+(1 row)
+
+-- Year lengths: 365 or 366, one of each year -61..3177 without gaps, summing
+-- to the whole range, and Esfand has 30 days exactly in the 366-day years.
+-- 785 leap years is a pinned count for this range (3239 years * 365 + 785).
+SELECT count(*) AS years,
+       min(jy) AS first_year,
+       max(jy) AS last_year,
+       sum(len) AS total_days,
+       count(*) FILTER (WHERE len NOT IN (365, 366)) AS year_length_violations,
+       count(*) FILTER (WHERE (esfand = 30) <> (len = 366)) AS leap_esfand_violations,
+       count(*) FILTER (WHERE len = 366) AS leap_years
+FROM (SELECT jy, count(*) AS len,
+             max(jd) FILTER (WHERE jm = 12) AS esfand
+      FROM fullrange_days GROUP BY jy) AS y;
+ years | first_year | last_year | total_days | year_length_violations | leap_esfand_violations | leap_years 
+-------+------------+-----------+------------+------------------------+------------------------+------------
+  3239 |        -61 |      3177 |    1183020 |                      0 |                      0 |        785
+(1 row)
+
+-- (d) Gregorian cross-check through core. Day 1 of each Jalali month falls in
+-- a fixed Gregorian month and a 3-day window of days. For Farvardin (Nowruz)
+-- the window observed over this whole range is 20..22 March, a little
+-- tighter than the 19..22 usually quoted for the astronomical calendar, so
+-- this pins it rather than widening it.
+CREATE TEMP TABLE fullrange_month_start (jm int, gm int, lo int, hi int);
+INSERT INTO fullrange_month_start VALUES
+    (1, 3, 20, 22), (2, 4, 20, 22), (3, 5, 21, 23), (4, 6, 21, 23),
+    (5, 7, 22, 24), (6, 8, 22, 24), (7, 9, 22, 24), (8, 10, 22, 24),
+    (9, 11, 21, 23), (10, 12, 21, 23), (11, 1, 20, 22), (12, 2, 19, 21);
+SELECT count(*) AS month_starts,
+       count(*) FILTER (WHERE f.gm <> m.gm OR f.gdy NOT BETWEEN m.lo AND m.hi)
+           AS month_start_violations
+FROM fullrange_days AS f JOIN fullrange_month_start AS m USING (jm)
+WHERE f.jd = 1;
+ month_starts | month_start_violations 
+--------------+------------------------
+        38868 |                      0
+(1 row)
+
+-- Farvardin 1 of year y is in Gregorian year y + 621, in March.
+SELECT count(*) AS nowruz_days,
+       count(*) FILTER (WHERE NOT (gy = jy + 621 AND gm = 3 AND gdy BETWEEN 20 AND 22))
+           AS nowruz_violations
+FROM fullrange_days WHERE jm = 1 AND jd = 1;
+ nowruz_days | nowruz_violations 
+-------------+-------------------
+        3239 |                 0
+(1 row)
+
+-- Every day's Gregorian year is y + 621 or y + 622: Farvardin to Azar are
+-- the earlier one, Bahman and Esfand the later one, Dey straddles the new
+-- Gregorian year.
+SELECT count(*) FILTER (WHERE gy NOT IN (jy + 621, jy + 622)) AS gregorian_year_violations,
+       count(*) FILTER (WHERE jm <= 9 AND gy <> jy + 621) AS before_new_year_violations,
+       count(*) FILTER (WHERE jm >= 11 AND gy <> jy + 622) AS after_new_year_violations
+FROM fullrange_days;
+ gregorian_year_violations | before_new_year_violations | after_new_year_violations 
+---------------------------+----------------------------+---------------------------
+                         0 |                          0 |                         0
+(1 row)
+
+-- (e) the calendar-agnostic fields agree with core on the same day, and the
+-- Jalali fields agree with the text. dow and epoch run on every day; isodow
+-- is sampled (every 5th day, coprime to 7 so every weekday is hit) to keep
+-- the runtime down, since dow already covers every day.
+SELECT count(*) FILTER (WHERE jdate_part('dow', d) <> date_part('dow', dt)) AS dow_violations,
+       count(*) FILTER (WHERE g % 5 = 0
+                        AND jdate_part('isodow', d) <> date_part('isodow', dt)) AS isodow_violations,
+       count(*) FILTER (WHERE jdate_part('epoch', d) <> date_part('epoch', dt)) AS epoch_violations
+FROM fullrange_days;
+ dow_violations | isodow_violations | epoch_violations 
+----------------+-------------------+------------------
+              0 |                 0 |                0
+(1 row)
+
+SELECT count(*) FILTER (WHERE jdate_part('doy', d) <> (d - jdate_trunc('year', d)) + 1) AS doy_violations,
+       count(*) FILTER (WHERE jd <> (d - jdate_trunc('month', d)) + 1) AS month_trunc_violations
+FROM fullrange_days;
+ doy_violations | month_trunc_violations 
+----------------+------------------------
+              0 |                      0
+(1 row)
+
+SELECT count(*) FILTER (WHERE jy <> left(t, length(t) - 6)::int) AS year_text_violations,
+       count(*) FILTER (WHERE jm <> substr(t, length(t) - 4, 2)::int) AS month_text_violations,
+       count(*) FILTER (WHERE jd <> right(t, 2)::int) AS day_text_violations
+FROM fullrange_days;
+ year_text_violations | month_text_violations | day_text_violations 
+----------------------+-----------------------+---------------------
+                    0 |                     0 |                   0
+(1 row)
+
+-- Negative controls. This whole file passes on correct code, so these show
+-- the checks above can fail. Each shifts or thins the same data and must
+-- report violations.
+-- Text of the next day against this day's text: every pair differs.
+SELECT count(*) > 0 AS control_text_detects_mismatch
+FROM fullrange_days
+WHERE g < 1183019 AND (d + 1)::text <> t;
+ control_text_detects_mismatch 
+-------------------------------
+ t
+(1 row)
+
+-- The contiguity predicate on every second day of the first 100000: every
+-- step is a gap.
+SELECT fullrange_step_violations(2, 100000) > 0 AS control_step_detects_gaps;
+ control_step_detects_gaps 
+---------------------------
+ t
+(1 row)
+
+-- The Gregorian cross-check against a Nowruz window that is one day too narrow.
+SELECT count(*) FILTER (WHERE NOT (gm = 3 AND gdy BETWEEN 20 AND 21)) > 0
+           AS control_nowruz_detects_window
+FROM fullrange_days WHERE jm = 1 AND jd = 1;
+ control_nowruz_detects_window 
+-------------------------------
+ t
+(1 row)
+
+DROP FUNCTION fullrange_step_violations(int, int);
+DROP TABLE fullrange_month_start;
+DROP TABLE fullrange_days;
