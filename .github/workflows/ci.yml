@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [16, 17, 18]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-postgres
+        with:
+          version: ${{ matrix.pg }}
+      - name: Build
+        run: make PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      - name: Install
+        run: sudo make install PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      - name: Regression tests
+        run: make installcheck PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      - name: Dump and restore round trip
+        run: PGBIN=/usr/lib/postgresql/${{ matrix.pg }}/bin dev/dump-roundtrip.sh
+      - name: Show regression diffs
+        if: failure()
+        run: cat test/regression.diffs
+      - name: Upload regression output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regress-pg${{ matrix.pg }}
+          path: |
+            test/results
+            test/regression.diffs
+            test/regression.out
+          if-no-files-found: ignore
+      - name: Calendar test
+        run: make test-jalaali PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+  stress:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [16, 17, 18]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-postgres
+        with:
+          version: ${{ matrix.pg }}
+      - name: Build
+        run: make PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      - name: Install
+        run: sudo make install PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      - name: Concurrency stress (pgbench)
+        run: PGBIN=/usr/lib/postgresql/${{ matrix.pg }}/bin dev/stress.sh
+      - name: Stress verifier self-test (must detect the corruption)
+        run: |
+          # The self-test exits 3 when the verifier caught a deliberately
+          # corrupted ledger. Any other status, including 0 (not caught) or a
+          # setup failure, fails the step.
+          rc=0
+          PGBIN=/usr/lib/postgresql/${{ matrix.pg }}/bin dev/stress.sh --selftest || rc=$?
+          echo "selftest exit status: $rc"
+          test "$rc" -eq 3
+
+  perf:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [16, 17, 18]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-postgres
+        with:
+          version: ${{ matrix.pg }}
+      - name: Build
+        run: make PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      - name: Install
+        run: sudo make install PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      - name: Performance report
+        run: PGBIN=/usr/lib/postgresql/${{ matrix.pg }}/bin dev/perf-report.sh
+      - name: Upload performance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-pg${{ matrix.pg }}
+          path: perf-report.md
+          if-no-files-found: ignore

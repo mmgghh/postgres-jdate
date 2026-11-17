@@ -1,0 +1,40 @@
+name: Set up PostgreSQL
+description: Install PostgreSQL server and dev packages from PGDG and export connection settings.
+inputs:
+  version:
+    description: PostgreSQL major version
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install PostgreSQL ${{ inputs.version }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        V='${{ inputs.version }}'
+        sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+        sudo apt-get install -y "postgresql-$V" "postgresql-server-dev-$V"
+        # Keep exactly cluster $V/main; drop every other cluster (the runner
+        # image ships its own PostgreSQL, and the package may pick port 5433).
+        pg_lsclusters
+        for c in $(pg_lsclusters --no-header | awk '{print $1 "/" $2}'); do
+          if [ "$c" != "$V/main" ]; then
+            sudo pg_dropcluster --stop "${c%/*}" "${c#*/}"
+          fi
+        done
+        # The runner image does not auto-create a cluster for newly installed
+        # majors, so create $V/main when it is missing.
+        if ! pg_lsclusters --no-header | awk -v v="$V" '$1 == v && $2 == "main" {f=1} END {exit !f}'; then
+          sudo pg_createcluster "$V" main
+        fi
+        sudo pg_ctlcluster "$V" main start || true
+        pg_lsclusters
+        PORT=$(pg_lsclusters --no-header | awk -v v="$V" '$1 == v && $2 == "main" {print $3}')
+        test -n "$PORT"
+        sudo -u postgres createuser -s "$USER"
+        {
+          echo "PG_CONFIG=/usr/lib/postgresql/$V/bin/pg_config"
+          echo "PGHOST=/var/run/postgresql"
+          echo "PGPORT=$PORT"
+          echo "PGUSER=$USER"
+        } >> "$GITHUB_ENV"

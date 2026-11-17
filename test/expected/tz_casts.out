@@ -1,0 +1,856 @@
+-- jdate <-> timestamptz under non-UTC time zones.
+--
+-- jdate(timestamptz) and the timestamptz -> jdate assignment cast take the
+-- calendar day in the SESSION time zone (core's timestamptz_date), and
+-- timestamptz(jdate) is local midnight in the session zone. This file runs
+-- the same checks in six zones, one of them UTC and two of them at the
+-- extremes of the offset range (Pacific/Kiritimati is +14, Pacific/Pago_Pago
+-- is -11). Instants are built from LOCAL clock times with AT TIME ZONE, so a
+-- probe means the same thing whatever the session zone is.
+--
+-- Output must be identical on PostgreSQL 16, 17 and 18: DateStyle and
+-- timezone are set explicitly (pg_regress forces PGTZ=PST8PDT and a
+-- non-ISO DateStyle), only dates, booleans and counts are printed, and no
+-- probe lies near a tzdata rule change (the only past rule change used is
+-- Tehran's summer time in 2020, two years before it was abolished).
+SET DateStyle = 'ISO, YMD';
+SET timezone = 'UTC';
+-- results collected per zone and printed together at the end
+CREATE TABLE tz_ins (
+    id    int GENERATED ALWAYS AS IDENTITY,
+    zone  text,
+    lt    timestamp,   -- local clock time in zone
+    d     jdate,       -- stored through the assignment cast
+    expect jdate
+);
+CREATE TABLE tz_nowruz (
+    id    int GENERATED ALWAYS AS IDENTITY,
+    zone  text,
+    d     jdate,
+    expect jdate
+);
+-- ---------------------------------------------------------------------
+-- Per zone: instants just before and after local midnight, the INSERT
+-- (assignment cast) path, timestamptz(jdate) is local midnight, round
+-- trip jdate(timestamptz(d)) = d over all of 1403, hourly instants over a
+-- year against core's own date conversion, the Nowruz instant, and
+-- jdate_format. Local 2024-03-19 is 1402-12-29 and 2024-03-20 is 1403-01-01
+-- (Nowruz 1403) in every zone.
+-- ---------------------------------------------------------------------
+-- ===== UTC =====
+SET timezone = 'UTC';
+SELECT current_setting('timezone') AS zone;
+ zone 
+------
+ UTC
+(1 row)
+
+-- function form around local midnight
+SELECT lt, jdate(lt AT TIME ZONE 'UTC') AS day
+FROM (VALUES (timestamp '2024-03-19 23:59:59'),
+             (timestamp '2024-03-19 23:59:59.999999'),
+             (timestamp '2024-03-20 00:00:00'),
+             (timestamp '2024-03-20 00:00:00.000001')) v(lt)
+ORDER BY lt;
+             lt             |    day     
+----------------------------+------------
+ 2024-03-19 23:59:59        | 1402-12-29
+ 2024-03-19 23:59:59.999999 | 1402-12-29
+ 2024-03-20 00:00:00        | 1403-01-01
+ 2024-03-20 00:00:00.000001 | 1403-01-01
+(4 rows)
+
+-- assignment cast into a jdate column, same instants
+INSERT INTO tz_ins (zone, lt, d, expect)
+SELECT 'UTC', lt, lt AT TIME ZONE 'UTC', expect
+FROM (VALUES (timestamp '2024-03-19 23:59:59',           jdate '1402-12-29'),
+             (timestamp '2024-03-19 23:59:59.999999',    jdate '1402-12-29'),
+             (timestamp '2024-03-20 00:00:00',           jdate '1403-01-01'),
+             (timestamp '2024-03-20 00:00:00.000001',    jdate '1403-01-01')) v(lt, expect);
+-- timestamptz(jdate) is local midnight in this zone
+SELECT d, timestamptz(d) AT TIME ZONE 'UTC' AS local_ts,
+       timestamptz(d) = (d::timestamp AT TIME ZONE 'UTC') AS is_local_midnight
+FROM (VALUES (jdate '1402-12-29'), (jdate '1403-01-01'), (jdate '1403-05-15')) v(d)
+ORDER BY d;
+     d      |      local_ts       | is_local_midnight 
+------------+---------------------+-------------------
+ 1402-12-29 | 2024-03-19 00:00:00 | t
+ 1403-01-01 | 2024-03-20 00:00:00 | t
+ 1403-05-15 | 2024-08-05 00:00:00 | t
+(3 rows)
+
+-- round trip over every day of 1403 (it spans both DST changes of New_York
+-- and Auckland): no mismatch allowed
+SELECT count(*) AS days,
+       count(*) FILTER (WHERE jdate(timestamptz(d)) <> d) AS roundtrip_mismatches
+FROM (SELECT jdate '1403-01-01' + g AS d FROM generate_series(0, 365) g) s;
+ days | roundtrip_mismatches 
+------+----------------------
+  366 |                    0
+(1 row)
+
+-- every hour of 2024: jdate(ts) is core's date conversion of the same ts,
+-- both through the session zone and through an explicit AT TIME ZONE
+SELECT count(*) AS instants,
+       count(*) FILTER (WHERE jdate(ts) <> (ts::date)::jdate) AS mismatches,
+       count(*) FILTER (WHERE jdate(ts) <> ((ts AT TIME ZONE 'UTC')::date)::jdate) AS mismatches_at_time_zone
+FROM generate_series(timestamptz '2024-01-01 00:00:00+00',
+                     timestamptz '2024-12-31 23:00:00+00',
+                     interval '1 hour') AS ts;
+ instants | mismatches | mismatches_at_time_zone 
+----------+------------+-------------------------
+     8784 |          0 |                       0
+(1 row)
+
+-- the Nowruz 1403 instant: 00:30 Tehran time on 2024-03-20
+INSERT INTO tz_nowruz (zone, d, expect)
+VALUES ('UTC', jdate(timestamptz '2024-03-20 00:30:00+03:30'), jdate '1402-12-29');
+-- jdate_format at that instant, with and without the time of day
+SELECT jdate_format(timestamptz '2024-03-20 00:30:00+03:30') AS fmt_time,
+       jdate_format(timestamptz '2024-03-20 00:30:00+03:30', false) AS fmt_date;
+      fmt_time       |  fmt_date  
+---------------------+------------
+ 1402-12-29 21:00:00 | 1402-12-29
+(1 row)
+
+SELECT jdate_format(timestamptz '2024-03-19 23:59:59+00') AS fmt_utc_before_midnight,
+       jdate_format(timestamptz '2024-03-20 00:00:00+00', false) AS fmt_utc_midnight_date;
+ fmt_utc_before_midnight | fmt_utc_midnight_date 
+-------------------------+-----------------------
+ 1402-12-29 23:59:59     | 1403-01-01
+(1 row)
+
+-- ===== Asia/Tehran =====
+SET timezone = 'Asia/Tehran';
+SELECT current_setting('timezone') AS zone;
+    zone     
+-------------
+ Asia/Tehran
+(1 row)
+
+-- function form around local midnight
+SELECT lt, jdate(lt AT TIME ZONE 'Asia/Tehran') AS day
+FROM (VALUES (timestamp '2024-03-19 23:59:59'),
+             (timestamp '2024-03-19 23:59:59.999999'),
+             (timestamp '2024-03-20 00:00:00'),
+             (timestamp '2024-03-20 00:00:00.000001')) v(lt)
+ORDER BY lt;
+             lt             |    day     
+----------------------------+------------
+ 2024-03-19 23:59:59        | 1402-12-29
+ 2024-03-19 23:59:59.999999 | 1402-12-29
+ 2024-03-20 00:00:00        | 1403-01-01
+ 2024-03-20 00:00:00.000001 | 1403-01-01
+(4 rows)
+
+-- assignment cast into a jdate column, same instants
+INSERT INTO tz_ins (zone, lt, d, expect)
+SELECT 'Asia/Tehran', lt, lt AT TIME ZONE 'Asia/Tehran', expect
+FROM (VALUES (timestamp '2024-03-19 23:59:59',           jdate '1402-12-29'),
+             (timestamp '2024-03-19 23:59:59.999999',    jdate '1402-12-29'),
+             (timestamp '2024-03-20 00:00:00',           jdate '1403-01-01'),
+             (timestamp '2024-03-20 00:00:00.000001',    jdate '1403-01-01')) v(lt, expect);
+-- timestamptz(jdate) is local midnight in this zone
+SELECT d, timestamptz(d) AT TIME ZONE 'Asia/Tehran' AS local_ts,
+       timestamptz(d) = (d::timestamp AT TIME ZONE 'Asia/Tehran') AS is_local_midnight
+FROM (VALUES (jdate '1402-12-29'), (jdate '1403-01-01'), (jdate '1403-05-15')) v(d)
+ORDER BY d;
+     d      |      local_ts       | is_local_midnight 
+------------+---------------------+-------------------
+ 1402-12-29 | 2024-03-19 00:00:00 | t
+ 1403-01-01 | 2024-03-20 00:00:00 | t
+ 1403-05-15 | 2024-08-05 00:00:00 | t
+(3 rows)
+
+-- round trip over every day of 1403 (it spans both DST changes of New_York
+-- and Auckland): no mismatch allowed
+SELECT count(*) AS days,
+       count(*) FILTER (WHERE jdate(timestamptz(d)) <> d) AS roundtrip_mismatches
+FROM (SELECT jdate '1403-01-01' + g AS d FROM generate_series(0, 365) g) s;
+ days | roundtrip_mismatches 
+------+----------------------
+  366 |                    0
+(1 row)
+
+-- every hour of 2024: jdate(ts) is core's date conversion of the same ts,
+-- both through the session zone and through an explicit AT TIME ZONE
+SELECT count(*) AS instants,
+       count(*) FILTER (WHERE jdate(ts) <> (ts::date)::jdate) AS mismatches,
+       count(*) FILTER (WHERE jdate(ts) <> ((ts AT TIME ZONE 'Asia/Tehran')::date)::jdate) AS mismatches_at_time_zone
+FROM generate_series(timestamptz '2024-01-01 00:00:00+00',
+                     timestamptz '2024-12-31 23:00:00+00',
+                     interval '1 hour') AS ts;
+ instants | mismatches | mismatches_at_time_zone 
+----------+------------+-------------------------
+     8784 |          0 |                       0
+(1 row)
+
+-- the Nowruz 1403 instant: 00:30 Tehran time on 2024-03-20
+INSERT INTO tz_nowruz (zone, d, expect)
+VALUES ('Asia/Tehran', jdate(timestamptz '2024-03-20 00:30:00+03:30'), jdate '1403-01-01');
+-- jdate_format at that instant, with and without the time of day
+SELECT jdate_format(timestamptz '2024-03-20 00:30:00+03:30') AS fmt_time,
+       jdate_format(timestamptz '2024-03-20 00:30:00+03:30', false) AS fmt_date;
+      fmt_time       |  fmt_date  
+---------------------+------------
+ 1403-01-01 00:30:00 | 1403-01-01
+(1 row)
+
+SELECT jdate_format(timestamptz '2024-03-19 23:59:59+00') AS fmt_utc_before_midnight,
+       jdate_format(timestamptz '2024-03-20 00:00:00+00', false) AS fmt_utc_midnight_date;
+ fmt_utc_before_midnight | fmt_utc_midnight_date 
+-------------------------+-----------------------
+ 1403-01-01 03:29:59     | 1403-01-01
+(1 row)
+
+-- ===== America/New_York =====
+SET timezone = 'America/New_York';
+SELECT current_setting('timezone') AS zone;
+       zone       
+------------------
+ America/New_York
+(1 row)
+
+-- function form around local midnight
+SELECT lt, jdate(lt AT TIME ZONE 'America/New_York') AS day
+FROM (VALUES (timestamp '2024-03-19 23:59:59'),
+             (timestamp '2024-03-19 23:59:59.999999'),
+             (timestamp '2024-03-20 00:00:00'),
+             (timestamp '2024-03-20 00:00:00.000001')) v(lt)
+ORDER BY lt;
+             lt             |    day     
+----------------------------+------------
+ 2024-03-19 23:59:59        | 1402-12-29
+ 2024-03-19 23:59:59.999999 | 1402-12-29
+ 2024-03-20 00:00:00        | 1403-01-01
+ 2024-03-20 00:00:00.000001 | 1403-01-01
+(4 rows)
+
+-- assignment cast into a jdate column, same instants
+INSERT INTO tz_ins (zone, lt, d, expect)
+SELECT 'America/New_York', lt, lt AT TIME ZONE 'America/New_York', expect
+FROM (VALUES (timestamp '2024-03-19 23:59:59',           jdate '1402-12-29'),
+             (timestamp '2024-03-19 23:59:59.999999',    jdate '1402-12-29'),
+             (timestamp '2024-03-20 00:00:00',           jdate '1403-01-01'),
+             (timestamp '2024-03-20 00:00:00.000001',    jdate '1403-01-01')) v(lt, expect);
+-- timestamptz(jdate) is local midnight in this zone
+SELECT d, timestamptz(d) AT TIME ZONE 'America/New_York' AS local_ts,
+       timestamptz(d) = (d::timestamp AT TIME ZONE 'America/New_York') AS is_local_midnight
+FROM (VALUES (jdate '1402-12-29'), (jdate '1403-01-01'), (jdate '1403-05-15')) v(d)
+ORDER BY d;
+     d      |      local_ts       | is_local_midnight 
+------------+---------------------+-------------------
+ 1402-12-29 | 2024-03-19 00:00:00 | t
+ 1403-01-01 | 2024-03-20 00:00:00 | t
+ 1403-05-15 | 2024-08-05 00:00:00 | t
+(3 rows)
+
+-- round trip over every day of 1403 (it spans both DST changes of New_York
+-- and Auckland): no mismatch allowed
+SELECT count(*) AS days,
+       count(*) FILTER (WHERE jdate(timestamptz(d)) <> d) AS roundtrip_mismatches
+FROM (SELECT jdate '1403-01-01' + g AS d FROM generate_series(0, 365) g) s;
+ days | roundtrip_mismatches 
+------+----------------------
+  366 |                    0
+(1 row)
+
+-- every hour of 2024: jdate(ts) is core's date conversion of the same ts,
+-- both through the session zone and through an explicit AT TIME ZONE
+SELECT count(*) AS instants,
+       count(*) FILTER (WHERE jdate(ts) <> (ts::date)::jdate) AS mismatches,
+       count(*) FILTER (WHERE jdate(ts) <> ((ts AT TIME ZONE 'America/New_York')::date)::jdate) AS mismatches_at_time_zone
+FROM generate_series(timestamptz '2024-01-01 00:00:00+00',
+                     timestamptz '2024-12-31 23:00:00+00',
+                     interval '1 hour') AS ts;
+ instants | mismatches | mismatches_at_time_zone 
+----------+------------+-------------------------
+     8784 |          0 |                       0
+(1 row)
+
+-- the Nowruz 1403 instant: 00:30 Tehran time on 2024-03-20
+INSERT INTO tz_nowruz (zone, d, expect)
+VALUES ('America/New_York', jdate(timestamptz '2024-03-20 00:30:00+03:30'), jdate '1402-12-29');
+-- jdate_format at that instant, with and without the time of day
+SELECT jdate_format(timestamptz '2024-03-20 00:30:00+03:30') AS fmt_time,
+       jdate_format(timestamptz '2024-03-20 00:30:00+03:30', false) AS fmt_date;
+      fmt_time       |  fmt_date  
+---------------------+------------
+ 1402-12-29 17:00:00 | 1402-12-29
+(1 row)
+
+SELECT jdate_format(timestamptz '2024-03-19 23:59:59+00') AS fmt_utc_before_midnight,
+       jdate_format(timestamptz '2024-03-20 00:00:00+00', false) AS fmt_utc_midnight_date;
+ fmt_utc_before_midnight | fmt_utc_midnight_date 
+-------------------------+-----------------------
+ 1402-12-29 19:59:59     | 1402-12-29
+(1 row)
+
+-- ===== Pacific/Kiritimati =====
+SET timezone = 'Pacific/Kiritimati';
+SELECT current_setting('timezone') AS zone;
+        zone        
+--------------------
+ Pacific/Kiritimati
+(1 row)
+
+-- function form around local midnight
+SELECT lt, jdate(lt AT TIME ZONE 'Pacific/Kiritimati') AS day
+FROM (VALUES (timestamp '2024-03-19 23:59:59'),
+             (timestamp '2024-03-19 23:59:59.999999'),
+             (timestamp '2024-03-20 00:00:00'),
+             (timestamp '2024-03-20 00:00:00.000001')) v(lt)
+ORDER BY lt;
+             lt             |    day     
+----------------------------+------------
+ 2024-03-19 23:59:59        | 1402-12-29
+ 2024-03-19 23:59:59.999999 | 1402-12-29
+ 2024-03-20 00:00:00        | 1403-01-01
+ 2024-03-20 00:00:00.000001 | 1403-01-01
+(4 rows)
+
+-- assignment cast into a jdate column, same instants
+INSERT INTO tz_ins (zone, lt, d, expect)
+SELECT 'Pacific/Kiritimati', lt, lt AT TIME ZONE 'Pacific/Kiritimati', expect
+FROM (VALUES (timestamp '2024-03-19 23:59:59',           jdate '1402-12-29'),
+             (timestamp '2024-03-19 23:59:59.999999',    jdate '1402-12-29'),
+             (timestamp '2024-03-20 00:00:00',           jdate '1403-01-01'),
+             (timestamp '2024-03-20 00:00:00.000001',    jdate '1403-01-01')) v(lt, expect);
+-- timestamptz(jdate) is local midnight in this zone
+SELECT d, timestamptz(d) AT TIME ZONE 'Pacific/Kiritimati' AS local_ts,
+       timestamptz(d) = (d::timestamp AT TIME ZONE 'Pacific/Kiritimati') AS is_local_midnight
+FROM (VALUES (jdate '1402-12-29'), (jdate '1403-01-01'), (jdate '1403-05-15')) v(d)
+ORDER BY d;
+     d      |      local_ts       | is_local_midnight 
+------------+---------------------+-------------------
+ 1402-12-29 | 2024-03-19 00:00:00 | t
+ 1403-01-01 | 2024-03-20 00:00:00 | t
+ 1403-05-15 | 2024-08-05 00:00:00 | t
+(3 rows)
+
+-- round trip over every day of 1403 (it spans both DST changes of New_York
+-- and Auckland): no mismatch allowed
+SELECT count(*) AS days,
+       count(*) FILTER (WHERE jdate(timestamptz(d)) <> d) AS roundtrip_mismatches
+FROM (SELECT jdate '1403-01-01' + g AS d FROM generate_series(0, 365) g) s;
+ days | roundtrip_mismatches 
+------+----------------------
+  366 |                    0
+(1 row)
+
+-- every hour of 2024: jdate(ts) is core's date conversion of the same ts,
+-- both through the session zone and through an explicit AT TIME ZONE
+SELECT count(*) AS instants,
+       count(*) FILTER (WHERE jdate(ts) <> (ts::date)::jdate) AS mismatches,
+       count(*) FILTER (WHERE jdate(ts) <> ((ts AT TIME ZONE 'Pacific/Kiritimati')::date)::jdate) AS mismatches_at_time_zone
+FROM generate_series(timestamptz '2024-01-01 00:00:00+00',
+                     timestamptz '2024-12-31 23:00:00+00',
+                     interval '1 hour') AS ts;
+ instants | mismatches | mismatches_at_time_zone 
+----------+------------+-------------------------
+     8784 |          0 |                       0
+(1 row)
+
+-- the Nowruz 1403 instant: 00:30 Tehran time on 2024-03-20
+INSERT INTO tz_nowruz (zone, d, expect)
+VALUES ('Pacific/Kiritimati', jdate(timestamptz '2024-03-20 00:30:00+03:30'), jdate '1403-01-01');
+-- jdate_format at that instant, with and without the time of day
+SELECT jdate_format(timestamptz '2024-03-20 00:30:00+03:30') AS fmt_time,
+       jdate_format(timestamptz '2024-03-20 00:30:00+03:30', false) AS fmt_date;
+      fmt_time       |  fmt_date  
+---------------------+------------
+ 1403-01-01 11:00:00 | 1403-01-01
+(1 row)
+
+SELECT jdate_format(timestamptz '2024-03-19 23:59:59+00') AS fmt_utc_before_midnight,
+       jdate_format(timestamptz '2024-03-20 00:00:00+00', false) AS fmt_utc_midnight_date;
+ fmt_utc_before_midnight | fmt_utc_midnight_date 
+-------------------------+-----------------------
+ 1403-01-01 13:59:59     | 1403-01-01
+(1 row)
+
+-- ===== Pacific/Pago_Pago =====
+SET timezone = 'Pacific/Pago_Pago';
+SELECT current_setting('timezone') AS zone;
+       zone        
+-------------------
+ Pacific/Pago_Pago
+(1 row)
+
+-- function form around local midnight
+SELECT lt, jdate(lt AT TIME ZONE 'Pacific/Pago_Pago') AS day
+FROM (VALUES (timestamp '2024-03-19 23:59:59'),
+             (timestamp '2024-03-19 23:59:59.999999'),
+             (timestamp '2024-03-20 00:00:00'),
+             (timestamp '2024-03-20 00:00:00.000001')) v(lt)
+ORDER BY lt;
+             lt             |    day     
+----------------------------+------------
+ 2024-03-19 23:59:59        | 1402-12-29
+ 2024-03-19 23:59:59.999999 | 1402-12-29
+ 2024-03-20 00:00:00        | 1403-01-01
+ 2024-03-20 00:00:00.000001 | 1403-01-01
+(4 rows)
+
+-- assignment cast into a jdate column, same instants
+INSERT INTO tz_ins (zone, lt, d, expect)
+SELECT 'Pacific/Pago_Pago', lt, lt AT TIME ZONE 'Pacific/Pago_Pago', expect
+FROM (VALUES (timestamp '2024-03-19 23:59:59',           jdate '1402-12-29'),
+             (timestamp '2024-03-19 23:59:59.999999',    jdate '1402-12-29'),
+             (timestamp '2024-03-20 00:00:00',           jdate '1403-01-01'),
+             (timestamp '2024-03-20 00:00:00.000001',    jdate '1403-01-01')) v(lt, expect);
+-- timestamptz(jdate) is local midnight in this zone
+SELECT d, timestamptz(d) AT TIME ZONE 'Pacific/Pago_Pago' AS local_ts,
+       timestamptz(d) = (d::timestamp AT TIME ZONE 'Pacific/Pago_Pago') AS is_local_midnight
+FROM (VALUES (jdate '1402-12-29'), (jdate '1403-01-01'), (jdate '1403-05-15')) v(d)
+ORDER BY d;
+     d      |      local_ts       | is_local_midnight 
+------------+---------------------+-------------------
+ 1402-12-29 | 2024-03-19 00:00:00 | t
+ 1403-01-01 | 2024-03-20 00:00:00 | t
+ 1403-05-15 | 2024-08-05 00:00:00 | t
+(3 rows)
+
+-- round trip over every day of 1403 (it spans both DST changes of New_York
+-- and Auckland): no mismatch allowed
+SELECT count(*) AS days,
+       count(*) FILTER (WHERE jdate(timestamptz(d)) <> d) AS roundtrip_mismatches
+FROM (SELECT jdate '1403-01-01' + g AS d FROM generate_series(0, 365) g) s;
+ days | roundtrip_mismatches 
+------+----------------------
+  366 |                    0
+(1 row)
+
+-- every hour of 2024: jdate(ts) is core's date conversion of the same ts,
+-- both through the session zone and through an explicit AT TIME ZONE
+SELECT count(*) AS instants,
+       count(*) FILTER (WHERE jdate(ts) <> (ts::date)::jdate) AS mismatches,
+       count(*) FILTER (WHERE jdate(ts) <> ((ts AT TIME ZONE 'Pacific/Pago_Pago')::date)::jdate) AS mismatches_at_time_zone
+FROM generate_series(timestamptz '2024-01-01 00:00:00+00',
+                     timestamptz '2024-12-31 23:00:00+00',
+                     interval '1 hour') AS ts;
+ instants | mismatches | mismatches_at_time_zone 
+----------+------------+-------------------------
+     8784 |          0 |                       0
+(1 row)
+
+-- the Nowruz 1403 instant: 00:30 Tehran time on 2024-03-20
+INSERT INTO tz_nowruz (zone, d, expect)
+VALUES ('Pacific/Pago_Pago', jdate(timestamptz '2024-03-20 00:30:00+03:30'), jdate '1402-12-29');
+-- jdate_format at that instant, with and without the time of day
+SELECT jdate_format(timestamptz '2024-03-20 00:30:00+03:30') AS fmt_time,
+       jdate_format(timestamptz '2024-03-20 00:30:00+03:30', false) AS fmt_date;
+      fmt_time       |  fmt_date  
+---------------------+------------
+ 1402-12-29 10:00:00 | 1402-12-29
+(1 row)
+
+SELECT jdate_format(timestamptz '2024-03-19 23:59:59+00') AS fmt_utc_before_midnight,
+       jdate_format(timestamptz '2024-03-20 00:00:00+00', false) AS fmt_utc_midnight_date;
+ fmt_utc_before_midnight | fmt_utc_midnight_date 
+-------------------------+-----------------------
+ 1402-12-29 12:59:59     | 1402-12-29
+(1 row)
+
+-- ===== Pacific/Auckland =====
+SET timezone = 'Pacific/Auckland';
+SELECT current_setting('timezone') AS zone;
+       zone       
+------------------
+ Pacific/Auckland
+(1 row)
+
+-- function form around local midnight
+SELECT lt, jdate(lt AT TIME ZONE 'Pacific/Auckland') AS day
+FROM (VALUES (timestamp '2024-03-19 23:59:59'),
+             (timestamp '2024-03-19 23:59:59.999999'),
+             (timestamp '2024-03-20 00:00:00'),
+             (timestamp '2024-03-20 00:00:00.000001')) v(lt)
+ORDER BY lt;
+             lt             |    day     
+----------------------------+------------
+ 2024-03-19 23:59:59        | 1402-12-29
+ 2024-03-19 23:59:59.999999 | 1402-12-29
+ 2024-03-20 00:00:00        | 1403-01-01
+ 2024-03-20 00:00:00.000001 | 1403-01-01
+(4 rows)
+
+-- assignment cast into a jdate column, same instants
+INSERT INTO tz_ins (zone, lt, d, expect)
+SELECT 'Pacific/Auckland', lt, lt AT TIME ZONE 'Pacific/Auckland', expect
+FROM (VALUES (timestamp '2024-03-19 23:59:59',           jdate '1402-12-29'),
+             (timestamp '2024-03-19 23:59:59.999999',    jdate '1402-12-29'),
+             (timestamp '2024-03-20 00:00:00',           jdate '1403-01-01'),
+             (timestamp '2024-03-20 00:00:00.000001',    jdate '1403-01-01')) v(lt, expect);
+-- timestamptz(jdate) is local midnight in this zone
+SELECT d, timestamptz(d) AT TIME ZONE 'Pacific/Auckland' AS local_ts,
+       timestamptz(d) = (d::timestamp AT TIME ZONE 'Pacific/Auckland') AS is_local_midnight
+FROM (VALUES (jdate '1402-12-29'), (jdate '1403-01-01'), (jdate '1403-05-15')) v(d)
+ORDER BY d;
+     d      |      local_ts       | is_local_midnight 
+------------+---------------------+-------------------
+ 1402-12-29 | 2024-03-19 00:00:00 | t
+ 1403-01-01 | 2024-03-20 00:00:00 | t
+ 1403-05-15 | 2024-08-05 00:00:00 | t
+(3 rows)
+
+-- round trip over every day of 1403 (it spans both DST changes of New_York
+-- and Auckland): no mismatch allowed
+SELECT count(*) AS days,
+       count(*) FILTER (WHERE jdate(timestamptz(d)) <> d) AS roundtrip_mismatches
+FROM (SELECT jdate '1403-01-01' + g AS d FROM generate_series(0, 365) g) s;
+ days | roundtrip_mismatches 
+------+----------------------
+  366 |                    0
+(1 row)
+
+-- every hour of 2024: jdate(ts) is core's date conversion of the same ts,
+-- both through the session zone and through an explicit AT TIME ZONE
+SELECT count(*) AS instants,
+       count(*) FILTER (WHERE jdate(ts) <> (ts::date)::jdate) AS mismatches,
+       count(*) FILTER (WHERE jdate(ts) <> ((ts AT TIME ZONE 'Pacific/Auckland')::date)::jdate) AS mismatches_at_time_zone
+FROM generate_series(timestamptz '2024-01-01 00:00:00+00',
+                     timestamptz '2024-12-31 23:00:00+00',
+                     interval '1 hour') AS ts;
+ instants | mismatches | mismatches_at_time_zone 
+----------+------------+-------------------------
+     8784 |          0 |                       0
+(1 row)
+
+-- the Nowruz 1403 instant: 00:30 Tehran time on 2024-03-20
+INSERT INTO tz_nowruz (zone, d, expect)
+VALUES ('Pacific/Auckland', jdate(timestamptz '2024-03-20 00:30:00+03:30'), jdate '1403-01-01');
+-- jdate_format at that instant, with and without the time of day
+SELECT jdate_format(timestamptz '2024-03-20 00:30:00+03:30') AS fmt_time,
+       jdate_format(timestamptz '2024-03-20 00:30:00+03:30', false) AS fmt_date;
+      fmt_time       |  fmt_date  
+---------------------+------------
+ 1403-01-01 10:00:00 | 1403-01-01
+(1 row)
+
+SELECT jdate_format(timestamptz '2024-03-19 23:59:59+00') AS fmt_utc_before_midnight,
+       jdate_format(timestamptz '2024-03-20 00:00:00+00', false) AS fmt_utc_midnight_date;
+ fmt_utc_before_midnight | fmt_utc_midnight_date 
+-------------------------+-----------------------
+ 1403-01-01 12:59:59     | 1403-01-01
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- Results gathered above
+-- ---------------------------------------------------------------------
+SET timezone = 'UTC';
+-- the INSERT path agrees with the expected local day in every zone
+SELECT zone, lt, d, d = expect AS as_expected FROM tz_ins ORDER BY id;
+        zone        |             lt             |     d      | as_expected 
+--------------------+----------------------------+------------+-------------
+ UTC                | 2024-03-19 23:59:59        | 1402-12-29 | t
+ UTC                | 2024-03-19 23:59:59.999999 | 1402-12-29 | t
+ UTC                | 2024-03-20 00:00:00        | 1403-01-01 | t
+ UTC                | 2024-03-20 00:00:00.000001 | 1403-01-01 | t
+ Asia/Tehran        | 2024-03-19 23:59:59        | 1402-12-29 | t
+ Asia/Tehran        | 2024-03-19 23:59:59.999999 | 1402-12-29 | t
+ Asia/Tehran        | 2024-03-20 00:00:00        | 1403-01-01 | t
+ Asia/Tehran        | 2024-03-20 00:00:00.000001 | 1403-01-01 | t
+ America/New_York   | 2024-03-19 23:59:59        | 1402-12-29 | t
+ America/New_York   | 2024-03-19 23:59:59.999999 | 1402-12-29 | t
+ America/New_York   | 2024-03-20 00:00:00        | 1403-01-01 | t
+ America/New_York   | 2024-03-20 00:00:00.000001 | 1403-01-01 | t
+ Pacific/Kiritimati | 2024-03-19 23:59:59        | 1402-12-29 | t
+ Pacific/Kiritimati | 2024-03-19 23:59:59.999999 | 1402-12-29 | t
+ Pacific/Kiritimati | 2024-03-20 00:00:00        | 1403-01-01 | t
+ Pacific/Kiritimati | 2024-03-20 00:00:00.000001 | 1403-01-01 | t
+ Pacific/Pago_Pago  | 2024-03-19 23:59:59        | 1402-12-29 | t
+ Pacific/Pago_Pago  | 2024-03-19 23:59:59.999999 | 1402-12-29 | t
+ Pacific/Pago_Pago  | 2024-03-20 00:00:00        | 1403-01-01 | t
+ Pacific/Pago_Pago  | 2024-03-20 00:00:00.000001 | 1403-01-01 | t
+ Pacific/Auckland   | 2024-03-19 23:59:59        | 1402-12-29 | t
+ Pacific/Auckland   | 2024-03-19 23:59:59.999999 | 1402-12-29 | t
+ Pacific/Auckland   | 2024-03-20 00:00:00        | 1403-01-01 | t
+ Pacific/Auckland   | 2024-03-20 00:00:00.000001 | 1403-01-01 | t
+(24 rows)
+
+SELECT count(*) AS probes, count(*) FILTER (WHERE d <> expect) AS wrong FROM tz_ins;
+ probes | wrong 
+--------+-------
+     24 |     0
+(1 row)
+
+-- one instant, different days: Tehran, Kiritimati and Auckland are already
+-- on 1403-01-01, UTC, New_York and Pago_Pago are still on 1402-12-29
+SELECT zone, d, d = expect AS as_expected FROM tz_nowruz ORDER BY id;
+        zone        |     d      | as_expected 
+--------------------+------------+-------------
+ UTC                | 1402-12-29 | t
+ Asia/Tehran        | 1403-01-01 | t
+ America/New_York   | 1402-12-29 | t
+ Pacific/Kiritimati | 1403-01-01 | t
+ Pacific/Pago_Pago  | 1402-12-29 | t
+ Pacific/Auckland   | 1403-01-01 | t
+(6 rows)
+
+SELECT count(DISTINCT d) AS distinct_days FROM tz_nowruz;
+ distinct_days 
+---------------
+             2
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- Daylight saving transition days, America/New_York 2024. Instants are
+-- given in UTC so there is no ambiguity at the repeated hour. The local day
+-- of the spring change (2024-03-10, 1402-12-20) has 23 hours, the day of
+-- the autumn change (2024-11-03, 1403-08-13) has 25.
+-- ---------------------------------------------------------------------
+SET timezone = 'America/New_York';
+SELECT ts AT TIME ZONE 'America/New_York' AS local_ts, jdate(ts) AS day
+FROM (VALUES (timestamptz '2024-03-10 04:59:59+00'),
+             (timestamptz '2024-03-10 05:00:00+00'),
+             (timestamptz '2024-03-10 06:59:59+00'),
+             (timestamptz '2024-03-10 07:00:00+00'),
+             (timestamptz '2024-03-11 03:59:59+00'),
+             (timestamptz '2024-03-11 04:00:00+00')) v(ts)
+ORDER BY ts;
+      local_ts       |    day     
+---------------------+------------
+ 2024-03-09 23:59:59 | 1402-12-19
+ 2024-03-10 00:00:00 | 1402-12-20
+ 2024-03-10 01:59:59 | 1402-12-20
+ 2024-03-10 03:00:00 | 1402-12-20
+ 2024-03-10 23:59:59 | 1402-12-20
+ 2024-03-11 00:00:00 | 1402-12-21
+(6 rows)
+
+SELECT jdate(ts) AS day, count(*) AS hours
+FROM generate_series(timestamptz '2024-03-10 05:00:00+00',
+                     timestamptz '2024-03-11 04:00:00+00',
+                     interval '1 hour') AS ts
+GROUP BY 1 ORDER BY 1;
+    day     | hours 
+------------+-------
+ 1402-12-20 |    23
+ 1402-12-21 |     1
+(2 rows)
+
+SELECT ts AT TIME ZONE 'America/New_York' AS local_ts, jdate(ts) AS day
+FROM (VALUES (timestamptz '2024-11-03 03:59:59+00'),
+             (timestamptz '2024-11-03 04:00:00+00'),
+             (timestamptz '2024-11-03 05:30:00+00'),
+             (timestamptz '2024-11-03 06:30:00+00'),
+             (timestamptz '2024-11-04 04:59:59+00'),
+             (timestamptz '2024-11-04 05:00:00+00')) v(ts)
+ORDER BY ts;
+      local_ts       |    day     
+---------------------+------------
+ 2024-11-02 23:59:59 | 1403-08-12
+ 2024-11-03 00:00:00 | 1403-08-13
+ 2024-11-03 01:30:00 | 1403-08-13
+ 2024-11-03 01:30:00 | 1403-08-13
+ 2024-11-03 23:59:59 | 1403-08-13
+ 2024-11-04 00:00:00 | 1403-08-14
+(6 rows)
+
+SELECT jdate(ts) AS day, count(*) AS hours
+FROM generate_series(timestamptz '2024-11-03 04:00:00+00',
+                     timestamptz '2024-11-04 05:00:00+00',
+                     interval '1 hour') AS ts
+GROUP BY 1 ORDER BY 1;
+    day     | hours 
+------------+-------
+ 1403-08-13 |    25
+ 1403-08-14 |     1
+(2 rows)
+
+-- local midnight of both days, and back
+SELECT d, timestamptz(d) AT TIME ZONE 'UTC' AS midnight_utc, jdate(timestamptz(d)) = d AS roundtrip_ok
+FROM (VALUES (jdate '1402-12-20'), (jdate '1403-08-13')) v(d) ORDER BY d;
+     d      |    midnight_utc     | roundtrip_ok 
+------------+---------------------+--------------
+ 1402-12-20 | 2024-03-10 05:00:00 | t
+ 1403-08-13 | 2024-11-03 04:00:00 | t
+(2 rows)
+
+-- ---------------------------------------------------------------------
+-- Pacific/Auckland: summer time ends 2024-04-07 (1403-01-19, a 25 hour
+-- day) and starts 2024-09-29 (1403-07-08, a 23 hour day).
+-- ---------------------------------------------------------------------
+SET timezone = 'Pacific/Auckland';
+SELECT ts AT TIME ZONE 'Pacific/Auckland' AS local_ts, jdate(ts) AS day
+FROM (VALUES (timestamptz '2024-04-06 10:59:59+00'),
+             (timestamptz '2024-04-06 11:00:00+00'),
+             (timestamptz '2024-04-06 13:30:00+00'),
+             (timestamptz '2024-04-06 14:30:00+00'),
+             (timestamptz '2024-04-07 11:59:59+00'),
+             (timestamptz '2024-04-07 12:00:00+00')) v(ts)
+ORDER BY ts;
+      local_ts       |    day     
+---------------------+------------
+ 2024-04-06 23:59:59 | 1403-01-18
+ 2024-04-07 00:00:00 | 1403-01-19
+ 2024-04-07 02:30:00 | 1403-01-19
+ 2024-04-07 02:30:00 | 1403-01-19
+ 2024-04-07 23:59:59 | 1403-01-19
+ 2024-04-08 00:00:00 | 1403-01-20
+(6 rows)
+
+SELECT jdate(ts) AS day, count(*) AS hours
+FROM generate_series(timestamptz '2024-04-06 11:00:00+00',
+                     timestamptz '2024-04-07 12:00:00+00',
+                     interval '1 hour') AS ts
+GROUP BY 1 ORDER BY 1;
+    day     | hours 
+------------+-------
+ 1403-01-19 |    25
+ 1403-01-20 |     1
+(2 rows)
+
+SELECT ts AT TIME ZONE 'Pacific/Auckland' AS local_ts, jdate(ts) AS day
+FROM (VALUES (timestamptz '2024-09-28 11:59:59+00'),
+             (timestamptz '2024-09-28 12:00:00+00'),
+             (timestamptz '2024-09-28 13:59:59+00'),
+             (timestamptz '2024-09-28 14:00:00+00'),
+             (timestamptz '2024-09-29 10:59:59+00'),
+             (timestamptz '2024-09-29 11:00:00+00')) v(ts)
+ORDER BY ts;
+      local_ts       |    day     
+---------------------+------------
+ 2024-09-28 23:59:59 | 1403-07-07
+ 2024-09-29 00:00:00 | 1403-07-08
+ 2024-09-29 01:59:59 | 1403-07-08
+ 2024-09-29 03:00:00 | 1403-07-08
+ 2024-09-29 23:59:59 | 1403-07-08
+ 2024-09-30 00:00:00 | 1403-07-09
+(6 rows)
+
+SELECT jdate(ts) AS day, count(*) AS hours
+FROM generate_series(timestamptz '2024-09-28 12:00:00+00',
+                     timestamptz '2024-09-29 11:00:00+00',
+                     interval '1 hour') AS ts
+GROUP BY 1 ORDER BY 1;
+    day     | hours 
+------------+-------
+ 1403-07-08 |    23
+ 1403-07-09 |     1
+(2 rows)
+
+SELECT d, timestamptz(d) AT TIME ZONE 'UTC' AS midnight_utc, jdate(timestamptz(d)) = d AS roundtrip_ok
+FROM (VALUES (jdate '1403-01-19'), (jdate '1403-07-08')) v(d) ORDER BY d;
+     d      |    midnight_utc     | roundtrip_ok 
+------------+---------------------+--------------
+ 1403-01-19 | 2024-04-06 11:00:00 | t
+ 1403-07-08 | 2024-09-28 12:00:00 | t
+(2 rows)
+
+-- ---------------------------------------------------------------------
+-- Asia/Tehran kept summer time (UTC+04:30) until 2022. 2020 is well away
+-- from that change: local midnight of 1399-04-25 (2020-07-15) was
+-- 19:30 UTC the evening before, while in winter (UTC+03:30) the midnight of
+-- 1398-10-25 (2020-01-15) was 20:30 UTC.
+-- ---------------------------------------------------------------------
+SET timezone = 'Asia/Tehran';
+SELECT ts AT TIME ZONE 'UTC' AS utc_ts, ts AT TIME ZONE 'Asia/Tehran' AS local_ts, jdate(ts) AS day
+FROM (VALUES (timestamptz '2020-07-14 19:15:00+00'),
+             (timestamptz '2020-07-14 19:45:00+00'),
+             (timestamptz '2020-01-14 20:15:00+00'),
+             (timestamptz '2020-01-14 20:45:00+00')) v(ts)
+ORDER BY ts;
+       utc_ts        |      local_ts       |    day     
+---------------------+---------------------+------------
+ 2020-01-14 20:15:00 | 2020-01-14 23:45:00 | 1398-10-24
+ 2020-01-14 20:45:00 | 2020-01-15 00:15:00 | 1398-10-25
+ 2020-07-14 19:15:00 | 2020-07-14 23:45:00 | 1399-04-24
+ 2020-07-14 19:45:00 | 2020-07-15 00:15:00 | 1399-04-25
+(4 rows)
+
+SELECT d, timestamptz(d) AT TIME ZONE 'UTC' AS midnight_utc, jdate(timestamptz(d)) = d AS roundtrip_ok
+FROM (VALUES (jdate '1399-04-25'), (jdate '1398-10-25')) v(d) ORDER BY d;
+     d      |    midnight_utc     | roundtrip_ok 
+------------+---------------------+--------------
+ 1398-10-25 | 2020-01-14 20:30:00 | t
+ 1399-04-25 | 2020-07-14 19:30:00 | t
+(2 rows)
+
+SELECT count(*) AS instants,
+       count(*) FILTER (WHERE jdate(ts) <> (ts::date)::jdate) AS mismatches,
+       count(*) FILTER (WHERE jdate(ts) <> ((ts AT TIME ZONE 'Asia/Tehran')::date)::jdate) AS mismatches_at_time_zone
+FROM generate_series(timestamptz '2020-01-01 00:00:00+00',
+                     timestamptz '2020-12-31 23:00:00+00',
+                     interval '1 hour') AS ts;
+ instants | mismatches | mismatches_at_time_zone 
+----------+------------+-------------------------
+     8784 |          0 |                       0
+(1 row)
+
+SELECT jdate_format(timestamptz '2020-07-14 19:45:00+00') AS fmt_summer,
+       jdate_format(timestamptz '2020-01-14 20:45:00+00') AS fmt_winter;
+     fmt_summer      |     fmt_winter      
+---------------------+---------------------
+ 1399-04-25 00:15:00 | 1398-10-25 00:15:00
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- Both edges of the Jalali range (-0061-01-01 and 3177-12-29) through
+-- timestamptz in the extreme zones. Local midnight comes back as the same
+-- day, the last second of the day still belongs to it, and one second
+-- before the min edge / 24 hours after the max edge is out of range
+-- (SQLSTATE 22008). The checks print booleans and local clock times only.
+-- ---------------------------------------------------------------------
+\set VERBOSITY sqlstate
+SET timezone = 'Pacific/Kiritimati';
+SELECT d, timestamptz(d) AT TIME ZONE 'Pacific/Kiritimati' AS local_ts,
+       jdate(timestamptz(d)) = d AS roundtrip_ok,
+       jdate(timestamptz(d) + interval '23 hours 59 minutes 59 seconds') = d AS last_second_ok,
+       jdate_format(timestamptz(d)) AS fmt
+FROM (VALUES (jdate '-0061-01-01'), (jdate '3177-12-29')) v(d) ORDER BY d;
+      d      |      local_ts       | roundtrip_ok | last_second_ok |         fmt          
+-------------+---------------------+--------------+----------------+----------------------
+ -0061-01-01 | 0560-03-20 00:00:00 | t            | t              | -0061-01-01 00:00:00
+ 3177-12-29  | 3799-03-19 00:00:00 | t            | t              | 3177-12-29 00:00:00
+(2 rows)
+
+SELECT jdate(timestamptz(jdate '-0061-01-01') - interval '1 second') IS NOT NULL AS below_min;
+ERROR:  22008
+SELECT jdate(timestamptz(jdate '3177-12-29') + interval '24 hours') IS NOT NULL AS above_max;
+ERROR:  22008
+SELECT jdate(timestamptz(jdate '-0061-01-02') - interval '1 second') AS min_edge_reached;
+ min_edge_reached 
+------------------
+ -0061-01-01
+(1 row)
+
+SELECT jdate(timestamptz(jdate '3177-12-28') + interval '24 hours') AS max_edge_reached;
+ max_edge_reached 
+------------------
+ 3177-12-29
+(1 row)
+
+SET timezone = 'Pacific/Pago_Pago';
+SELECT d, timestamptz(d) AT TIME ZONE 'Pacific/Pago_Pago' AS local_ts,
+       jdate(timestamptz(d)) = d AS roundtrip_ok,
+       jdate(timestamptz(d) + interval '23 hours 59 minutes 59 seconds') = d AS last_second_ok,
+       jdate_format(timestamptz(d)) AS fmt
+FROM (VALUES (jdate '-0061-01-01'), (jdate '3177-12-29')) v(d) ORDER BY d;
+      d      |      local_ts       | roundtrip_ok | last_second_ok |         fmt          
+-------------+---------------------+--------------+----------------+----------------------
+ -0061-01-01 | 0560-03-20 00:00:00 | t            | t              | -0061-01-01 00:00:00
+ 3177-12-29  | 3799-03-19 00:00:00 | t            | t              | 3177-12-29 00:00:00
+(2 rows)
+
+SELECT jdate(timestamptz(jdate '-0061-01-01') - interval '1 second') IS NOT NULL AS below_min;
+ERROR:  22008
+SELECT jdate(timestamptz(jdate '3177-12-29') + interval '24 hours') IS NOT NULL AS above_max;
+ERROR:  22008
+SELECT jdate(timestamptz(jdate '-0061-01-02') - interval '1 second') AS min_edge_reached;
+ min_edge_reached 
+------------------
+ -0061-01-01
+(1 row)
+
+SELECT jdate(timestamptz(jdate '3177-12-28') + interval '24 hours') AS max_edge_reached;
+ max_edge_reached 
+------------------
+ 3177-12-29
+(1 row)
+
+\set VERBOSITY default
+RESET timezone;
+DROP TABLE tz_ins;
+DROP TABLE tz_nowruz;
