@@ -36,3 +36,36 @@ FROM (SELECT '-0061-01-01'::jdate + g AS d
       WHERE g < 23000 OR g % 101 = 0) AS s;
 
 RESET timezone;
+
+-- infinity: jdate_format returns the text jdate_out uses ('infinity' and
+-- '-infinity'), with or without the time (it errored before). jdate_trunc and
+-- jdate_part on infinity are covered in fields.sql.
+SET timezone = 'UTC';
+SELECT jdate_format('infinity'::timestamptz) AS inf,
+       jdate_format('infinity'::timestamptz, true) AS inf_with_time,
+       jdate_format('infinity'::timestamptz, false) AS inf_date_only;
+SELECT jdate_format('-infinity'::timestamptz) AS ninf,
+       jdate_format('-infinity'::timestamptz, true) AS ninf_with_time,
+       jdate_format('-infinity'::timestamptz, false) AS ninf_date_only;
+SELECT jdate_format('infinity'::timestamptz) = 'infinity'::jdate::text AS inf_matches_jdate_out,
+       jdate_format('-infinity'::timestamptz) = '-infinity'::jdate::text AS ninf_matches_jdate_out;
+-- infinity does not depend on the session time zone
+SET timezone = 'Asia/Tehran';
+SELECT jdate_format('infinity'::timestamptz) AS inf_tehran,
+       jdate_format('-infinity'::timestamptz, false) AS ninf_tehran_date_only;
+SET timezone = 'UTC';
+
+-- a day beyond the Jalali range fails with 22008, on either side and with or
+-- without the time; the first days inside the range still format
+\set VERBOSITY sqlstate
+SELECT jdate_format('9999-12-31'::timestamptz);
+SELECT jdate_format('9999-12-31'::timestamptz, false);
+SELECT jdate_format('3177-12-29'::jdate::timestamptz + interval '1 day');
+SELECT jdate_format('3177-12-29'::jdate::timestamptz + interval '1 day', false);
+SELECT jdate_format('-0061-01-01'::jdate::timestamptz - interval '1 day');
+SELECT jdate_format('-0061-01-01'::jdate::timestamptz - interval '1 day', false);
+\set VERBOSITY default
+SELECT jdate_format('3177-12-29'::jdate::timestamptz + interval '23:59:59') AS max_year_last_second;
+SELECT jdate_format('-0061-01-01'::jdate::timestamptz, false) AS min_year_still_formats;
+
+RESET timezone;

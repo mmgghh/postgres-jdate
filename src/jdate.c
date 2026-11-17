@@ -59,6 +59,16 @@ jdate_format_ymd(const JalaaliDate *jd)
 					abs(jd->jy), jd->jm, jd->jd);
 }
 
+/*
+ * The text of an infinite day, shared by jdate_out and jdate_format. The
+ * caller has checked DATE_NOT_FINITE(value).
+ */
+static const char *
+jdate_infinity_text(DateADT value)
+{
+	return DATE_IS_NOBEGIN(value) ? "-infinity" : "infinity";
+}
+
 static JalaaliDate
 jdate_to_jalaali(DateADT value)
 {
@@ -243,10 +253,8 @@ jdate_out(PG_FUNCTION_ARGS)
 	DateADT		value = PG_GETARG_DATEADT(0);
 	char	   *result;
 
-	if (DATE_IS_NOBEGIN(value))
-		result = pstrdup("-infinity");
-	else if (DATE_IS_NOEND(value))
-		result = pstrdup("infinity");
+	if (DATE_NOT_FINITE(value))
+		result = pstrdup(jdate_infinity_text(value));
 	else
 	{
 		JalaaliDate jd = jdate_to_jalaali(value);
@@ -765,6 +773,11 @@ jdate_format_timestamptz(PG_FUNCTION_ARGS)
 
 	local_ts = DirectFunctionCall1(timestamptz_timestamp, TimestampTzGetDatum(ts));
 	day = DatumGetDateADT(DirectFunctionCall1(timestamp_date, local_ts));
+
+	/* infinity has no time of day either: same text as jdate_out */
+	if (DATE_NOT_FINITE(day))
+		PG_RETURN_TEXT_P(cstring_to_text(jdate_infinity_text(day)));
+
 	jd = jdate_to_jalaali(day);
 
 	if (with_time)
