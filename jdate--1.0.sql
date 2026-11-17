@@ -247,6 +247,15 @@ CREATE FUNCTION jdate_part(text, jdate) RETURNS float8
 -- syntax. This requires the extension to be installed by a superuser
 -- (or a role with equivalent privileges) -- already true for any
 -- C-language extension, since placing its files requires that access.
+--
+-- Because this one function lives outside the extension's schema, the
+-- extension cannot be relocatable: ALTER EXTENSION jdate SET SCHEMA would
+-- be refused by the server (the function is not in the extension's
+-- schema), so jdate.control sets relocatable = false. The schema is
+-- chosen at install time instead: CREATE EXTENSION jdate SCHEMA s.
+-- Every other object follows that schema; only extract() stays in
+-- pg_catalog, and EXTRACT(... FROM x) works whether or not s is on the
+-- search_path.
 CREATE FUNCTION pg_catalog.extract(text, jdate) RETURNS numeric
     AS 'MODULE_PATHNAME', 'jdate_extract' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
