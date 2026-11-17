@@ -1,5 +1,6 @@
 comment = 'Jalali (Persian) calendar date type'
 default_version = '1.0'
+# Requires PostgreSQL 16 or later (see the guard in the Makefile).
 module_pathname = '$libdir/jdate'
 # Not relocatable: the script registers extract(text, jdate) in pg_catalog,
 # because EXTRACT(... FROM x) always resolves to pg_catalog.extract. That

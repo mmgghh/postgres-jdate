@@ -9,6 +9,9 @@
 # cluster at a directory this script fully controls. No system directory
 # is ever touched.
 #
+# Note: this harness is PostgreSQL 18 only (it needs extension_control_path),
+# while the extension itself supports PostgreSQL 16 and later.
+#
 # Usage:
 #   dev/test-cluster.sh setup   # one-time: fetch PG18 dev headers, initdb
 #   dev/test-cluster.sh start   # start the local cluster (idempotent)

@@ -1,14 +1,14 @@
 #include "postgres.h"
 #include "fmgr.h"
 #include "libpq/pqformat.h"
-#include "nodes/miscnodes.h"
+#include "nodes/miscnodes.h"	/* soft errors (ereturn): PostgreSQL 16+ */
 #include "parser/scansup.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
 #include "utils/fmgrprotos.h"
 #include "utils/numeric.h"
-#include "varatt.h"
+#include "varatt.h"	/* split out of postgres.h in PostgreSQL 16 */
 #include "datatype/timestamp.h"
 
 #include "jalaali.h"
