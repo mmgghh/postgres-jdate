@@ -22,12 +22,18 @@ PG_MODULE_MAGIC;
  * check (jdate_check_range and its relatives).
  */
 void
-jdate_range_error(void)
+jdate_range_errsave(Node *escontext)
 {
-	ereport(ERROR,
+	errsave(escontext,
 			(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
 			 errmsg("jdate value is outside the supported Jalali range (years %d to %d)",
 					JALAALI_MIN_YEAR, JALAALI_MAX_YEAR)));
+}
+
+void
+jdate_range_error(void)
+{
+	jdate_range_errsave(NULL);
 }
 
 /* ---------------------------------------------------------------------

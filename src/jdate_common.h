@@ -13,6 +13,7 @@
 #define JDATE_COMMON_H
 
 #include "fmgr.h"
+#include "nodes/nodes.h"
 #include "datatype/timestamp.h"
 #include "utils/date.h"
 
@@ -36,6 +37,13 @@
 extern void jdate_range_error(void);
 
 /*
+ * The same error, reported softly: with an ErrorSaveContext in escontext it is
+ * saved and the call returns (the caller must then return at once); with NULL
+ * it is raised, like jdate_range_error.
+ */
+extern void jdate_range_errsave(Node *escontext);
+
+/*
  * Raise 22008 unless a finite value lies within the Jalali range. Infinity
  * and -infinity are always valid.
  */
@@ -47,6 +55,33 @@ jdate_check_range(DateADT value)
 
 	if (value < jalaali_min_jdn() - POSTGRES_EPOCH_JDATE ||
 		value > jalaali_max_jdn() - POSTGRES_EPOCH_JDATE)
+		jdate_range_error();
+}
+
+/*
+ * Whether a jtimestamp lies within the Jalali range: from the start of the first
+ * day (-0061-01-01 00:00:00) up to, not including, the start of the day after
+ * the last (3178-01-01 00:00:00). Infinity and -infinity are always valid.
+ *
+ * This is the single test behind every jtimestamp range check. The soft input
+ * path calls it directly (it must report through the ErrorSaveContext), every
+ * other path goes through jtimestamp_check_range.
+ */
+static inline bool
+jtimestamp_in_range(Timestamp value)
+{
+	if (TIMESTAMP_NOT_FINITE(value))
+		return true;
+
+	return value >= ((int64) jalaali_min_jdn() - POSTGRES_EPOCH_JDATE) * USECS_PER_DAY &&
+		value < ((int64) jalaali_max_jdn() + 1 - POSTGRES_EPOCH_JDATE) * USECS_PER_DAY;
+}
+
+/* Raise 22008 unless the jtimestamp is within the Jalali range. */
+static inline void
+jtimestamp_check_range(Timestamp value)
+{
+	if (!jtimestamp_in_range(value))
 		jdate_range_error();
 }
 

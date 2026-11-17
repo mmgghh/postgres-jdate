@@ -293,3 +293,61 @@ CREATE FUNCTION jdate_trunc(text, jdate) RETURNS jdate
 
 CREATE FUNCTION jdate_format(timestamptz, with_time boolean DEFAULT true) RETURNS text
     AS 'MODULE_PATHNAME', 'jdate_format_timestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+-- ============================================================
+-- jtimestamp: timestamp without time zone, Jalali text I/O
+-- ============================================================
+--
+-- jtimestamp has exactly the representation of core's timestamp (int64
+-- microseconds since 2000-01-01 00:00:00, infinities at the int64 extremes);
+-- only the text differs. Input is a Jalali date followed by whatever core's
+-- timestamp parser takes ('1403-01-01 12:30:45.5', '1403-01-01T12:30', ...), or
+-- one of the special words infinity, -infinity, now, today, tomorrow, yesterday,
+-- epoch. Output is always ISO with a Jalali date; DateStyle is ignored.
+-- The valid range is -0061-01-01 00:00:00 up to 3177-12-29 23:59:59.999999, and
+-- both infinities.
+
+CREATE TYPE jtimestamp;
+
+-- STABLE, not IMMUTABLE as jdate_in is: 'now', 'today', 'tomorrow' and
+-- 'yesterday' depend on the clock and the session time zone. Declared IMMUTABLE,
+-- a text-to-jtimestamp cast could be used in an index expression.
+CREATE FUNCTION jtimestamp_in(cstring, oid, integer) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jtimestamp_in'
+    LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION jtimestamp_out(jtimestamp) RETURNS cstring
+    AS 'MODULE_PATHNAME', 'jtimestamp_out'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION jtimestamp_recv(internal, oid, integer) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jtimestamp_recv'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION jtimestamp_send(jtimestamp) RETURNS bytea
+    AS 'MODULE_PATHNAME', 'jtimestamp_send'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- Core's timestamptypmodin is the type modifier input (jtimestamp(p), p 0..6).
+-- Core's timestamptypmodout would print "(p) without time zone", so it has its
+-- own output function that prints "(p)".
+CREATE FUNCTION jtimestamp_typmodout(integer) RETURNS cstring
+    AS 'MODULE_PATHNAME', 'jtimestamp_typmodout'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE jtimestamp (
+    INPUT = jtimestamp_in,
+    OUTPUT = jtimestamp_out,
+    RECEIVE = jtimestamp_recv,
+    SEND = jtimestamp_send,
+    TYPMOD_IN = timestamptypmodin,
+    TYPMOD_OUT = jtimestamp_typmodout,
+    INTERNALLENGTH = 8,
+    PASSEDBYVALUE,
+    ALIGNMENT = double,
+    STORAGE = plain,
+    CATEGORY = 'D',
+    PREFERRED = false
+);
+
+COMMENT ON TYPE jtimestamp IS 'Jalali (Persian) timestamp without time zone, 8 bytes, binary-compatible with timestamp';
