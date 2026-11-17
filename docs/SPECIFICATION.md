@@ -359,7 +359,7 @@ ordering operators use the `scalar*sel` estimators. `min`/`max` declare
 
 As declared in `jdate--1.0.sql` (and checked against `pg_proc`): all 29
 functions are `STRICT` and `PARALLEL SAFE`, and the two aggregates are
-`PARALLEL = SAFE`. 26 functions are `IMMUTABLE`; the three that depend on the
+`PARALLEL = SAFE` with a combine function. 26 functions are `IMMUTABLE`; the three that depend on the
 session `TimeZone` are `STABLE`: `jdate(timestamptz)`, `timestamptz(jdate)`
 and `jdate_format(timestamptz, boolean)`. In particular `to_jdate` is
 `IMMUTABLE` (it is indexable), as are `jdate_part`, `extract(text, jdate)` and
@@ -367,20 +367,27 @@ and `jdate_format(timestamptz, boolean)`. In particular `to_jdate` is
 
 The `parallel` test checks the catalog (no function or aggregate of the
 extension, nor an aggregate's transition function, is anything but `PARALLEL
-SAFE`) and then forces parallel plans (`parallel_setup_cost = 0`,
-`parallel_tuple_cost = 0`, two workers). It asserts that a `Gather` node is
-chosen for nine kinds of query (a range filter, `jdate + int`, `jdate_part`,
-`jdate_trunc`, `jdate_format`, `min`/`max`, grouped `min`/`max`, `ORDER BY`
-under a `Gather Merge`, and a hash join on `jdate`), and that each returns the
-same rows with zero and with two workers. It found no object that is not
-`PARALLEL SAFE`, so none had to be changed.
+SAFE`; `min(jdate)` and `max(jdate)` have `jdate_smaller` / `jdate_larger` as
+combine function, and it is `PARALLEL SAFE`) and then forces parallel plans
+(`parallel_setup_cost = 0`, `parallel_tuple_cost = 0`, two workers). It asserts
+that a `Gather` node is chosen for ten kinds of query (a range filter,
+`jdate + int`, `jdate_part`, `jdate_trunc`, `jdate_format`, `min`/`max`,
+`min`/`max` grouped by an expression, `min`/`max` grouped by a column, `ORDER
+BY` under a `Gather Merge`, and a hash join on `jdate`), that the plain and the
+column-grouped `min`/`max` use a Partial and a Finalize aggregate, and that
+each query returns the same rows with zero and with two workers. It found no
+object that is not `PARALLEL SAFE`, so none had to be changed.
 
-One limit of the aggregates: `min(jdate)` and `max(jdate)` are `PARALLEL =
-SAFE` but declare no `COMBINEFUNC`, so the planner cannot split them into a
-partial aggregate per worker plus a final combine. A parallel plan for them
-puts the `Gather` below a serial `Aggregate`: the workers scan in parallel and
-send the rows up, and one process does the aggregation. Results are the same;
-only the aggregation itself is not parallelised.
+`min(jdate)` and `max(jdate)` are `PARALLEL = SAFE` and declare a
+`COMBINEFUNC`: the same function as the transition function (`jdate_smaller`,
+`jdate_larger`), as in core's `date` aggregates. Both are `STRICT`, so a
+partial state that saw no rows (`NULL`) is skipped and the combine is just
+"take the smaller" or "take the larger". The planner can therefore run a
+Partial Aggregate in each worker below the `Gather` and a Finalize Aggregate
+above it, instead of sending every row up to one serial `Aggregate`. Whether it
+does is the planner's cost decision: with a grouping on an expression it may
+still choose a serial `GroupAggregate` over a `Gather Merge`. Results are the
+same either way.
 
 ## Extension properties
 
