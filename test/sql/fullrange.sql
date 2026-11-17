@@ -154,6 +154,20 @@ SELECT count(*) FILTER (WHERE jdate_part('dow', d) <> (date_part('dow', dt)::int
        count(*) FILTER (WHERE jdate_part('epoch', d) <> date_part('epoch', dt)) AS epoch_violations
 FROM fullrange_days;
 
+-- week truncation over every day whose week start is inside the range (the
+-- days before the range's first Saturday are out of range, covered in fields):
+-- the start is the day minus dow, a Saturday, and equal to core's Gregorian
+-- date minus its Saturday-first weekday number
+SELECT count(*) AS days,
+       count(*) FILTER (WHERE w IS NULL) AS before_first_saturday,
+       count(*) FILTER (WHERE w IS NOT NULL AND (w <> d - jdate_part('dow', d)::int
+                                                 OR jdate_part('dow', w) <> 0)) AS week_violations,
+       count(*) FILTER (WHERE w IS NOT NULL
+                        AND w::date <> dt - ((date_part('dow', dt)::int + 1) % 7)) AS core_violations
+FROM (SELECT d, dt,
+             CASE WHEN g >= jdate_part('dow', d) THEN jdate_trunc('week', d) END AS w
+      FROM fullrange_days) q;
+
 SELECT count(*) FILTER (WHERE jdate_part('doy', d) <> (d - jdate_trunc('year', d)) + 1) AS doy_violations,
        count(*) FILTER (WHERE jd <> (d - jdate_trunc('month', d)) + 1) AS month_trunc_violations
 FROM fullrange_days;

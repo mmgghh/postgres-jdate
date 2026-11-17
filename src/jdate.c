@@ -878,6 +878,20 @@ jdate_trunc(PG_FUNCTION_ARGS)
 			break;
 		case DTK_DAY:
 			break;
+		case DTK_WEEK:
+
+			/*
+			 * Weeks start on Saturday, as in the Saturday-first dow: the
+			 * start is the day minus its dow. The result is below the
+			 * minimum jdate for the first days of the range, which is an
+			 * out-of-range error; the top edge needs no check.
+			 */
+			{
+				DateADT		start = value - (j2day(value + POSTGRES_EPOCH_JDATE) + 1) % 7;
+
+				jdate_check_range(start);
+				PG_RETURN_DATEADT(start);
+			}
 		default:
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

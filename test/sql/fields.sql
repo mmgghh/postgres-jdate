@@ -67,7 +67,49 @@ SELECT jdate_trunc('quarter', '1403-05-15'::jdate) AS trunc_quarter;
 SELECT jdate_trunc('quarter', '1403-11-20'::jdate) AS trunc_quarter_q4;
 SELECT jdate_trunc('year', '1403-05-15'::jdate) AS trunc_year;
 SELECT jdate_trunc('year', '-infinity'::jdate) AS trunc_year_infinite;
-SELECT jdate_trunc('week', '1403-05-15'::jdate);  -- unsupported unit
+SELECT jdate_trunc('hour', '1403-05-15'::jdate);  -- unsupported unit
+
+-- week starts on Saturday, consistent with the Saturday-first dow: the week
+-- start is the day minus its dow. Every day of one full week (Saturday ..
+-- Friday) truncates to that Saturday, the next Saturday starts the next week;
+-- the first week crosses a month boundary (Mordad 31 -> Shahrivar 1, 1403)
+SELECT d AS jdate,
+       to_char(d::date, 'Dy') AS weekday,
+       jdate_part('dow', d) AS dow,
+       jdate_trunc('week', d) AS week_start
+FROM (SELECT '1403-05-27'::jdate + n AS d FROM generate_series(0, 7) AS n) AS w
+ORDER BY d;
+-- a week across the year boundary (1402 has 365 days) and one across month
+-- and year in the negative years (year -1 to year 0)
+SELECT d AS jdate, to_char(d::date, 'Dy') AS weekday, jdate_trunc('week', d) AS week_start
+FROM (SELECT '1402-12-25'::jdate + n AS d FROM generate_series(0, 7) AS n) AS w
+ORDER BY d;
+SELECT d AS jdate, to_char(d::date, 'Dy') AS weekday, jdate_trunc('week', d) AS week_start
+FROM (SELECT '-0001-12-26'::jdate + n AS d FROM generate_series(0, 7) AS n) AS w
+ORDER BY d;
+-- a week start in the previous month and the previous year
+SELECT jdate_trunc('week', '1403-01-01'::jdate) AS week_start_prev_year,
+       jdate_trunc('week', '1403-06-03'::jdate) AS week_start_prev_month;
+-- unit names are case-insensitive, and infinity stays infinity
+SELECT jdate_trunc('WEEK', '1403-05-31'::jdate) AS upper_week,
+       jdate_trunc('WeEk', '1403-05-31'::jdate) AS mixed_week,
+       jdate_trunc('week', 'infinity'::jdate) AS week_inf,
+       jdate_trunc('week', '-infinity'::jdate) AS week_ninf;
+-- both range edges: the first days of the range have a week start below the
+-- minimum jdate (an out-of-range error, no clamping) unless they are
+-- Saturdays themselves; the top edge needs no check
+CREATE FUNCTION pg_temp.week_probe(d jdate) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN jdate_trunc('week', d)::text;
+EXCEPTION WHEN datetime_field_overflow THEN
+  RETURN 'error ' || SQLSTATE;
+END $$;
+SELECT d AS jdate, jdate_part('dow', d) AS dow, pg_temp.week_probe(d) AS week_start
+FROM (SELECT '-0061-01-01'::jdate + n AS d FROM generate_series(0, 7) AS n) AS w
+ORDER BY d;
+SELECT d AS jdate, jdate_part('dow', d) AS dow, pg_temp.week_probe(d) AS week_start
+FROM (SELECT '3177-12-29'::jdate - n AS d FROM generate_series(0, 7) AS n) AS w
+ORDER BY d;
 
 -- decade is year / 10, as in core (decade 202 is 2020-2029), not the first
 -- year of the decade: the jdate years 1400..1409 are decade 140

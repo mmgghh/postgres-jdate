@@ -60,8 +60,8 @@ INSERT INTO cases (label, stmt, expected) VALUES
  $$SELECT jdate_part('timezone_minute', jdate '1403-05-15')$$, '0A000'),
 ('extract week',
  $$SELECT extract('week' FROM jdate '1403-05-15')$$, '0A000'),
-('jdate_trunc week',
- $$SELECT jdate_trunc('week', jdate '1403-05-15')$$, '0A000'),
+('jdate_trunc decade',
+ $$SELECT jdate_trunc('decade', jdate '1403-05-15')$$, '0A000'),
 ('jdate_trunc hour',
  $$SELECT jdate_trunc('hour', jdate '1403-05-15')$$, '0A000'),
 ('ALTER EXTENSION SET SCHEMA (not relocatable)',
@@ -95,7 +95,9 @@ INSERT INTO cases (label, stmt, expected) VALUES
 ('arithmetic: past the last day',
  $$SELECT jdate '3177-12-29' + 1$$, '22008'),
 ('arithmetic: before the first day',
- $$SELECT jdate '-0061-01-01' - 1$$, '22008');
+ $$SELECT jdate '-0061-01-01' - 1$$, '22008'),
+('jdate_trunc week: start before the first day',
+ $$SELECT jdate_trunc('week', jdate '-0061-01-02')$$, '22008');
 
 SELECT label,
        pg_temp.state(stmt) AS sqlstate,

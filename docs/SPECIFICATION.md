@@ -151,7 +151,7 @@ year), a year outside `-61` to `3177`, and any field that does not fit in a
 | `22008` | a finite day outside the Jalali range: binary receive, `jdate ± int`, `date`/`timestamp`/`timestamptz` casts, `to_jdate` (including `NaN` and epochs outside the range), `jdate_format` of such a day. Message: `jdate value is outside the supported Jalali range (years -61 to 3177)` | | no |
 | `22008` | `jdate - jdate` with an infinite operand (`cannot subtract infinite dates`), and a day count that overflows 32 bits (`date out of range`): core's own `date` errors | core | no |
 | `22023` `invalid_parameter_value` | a unit name core does not recognise: `jdate_part`, `EXTRACT`, `jdate_trunc` | | no |
-| `0A000` `feature_not_supported` | a recognised but unsupported unit (`jdate_part`/`EXTRACT`: `week`, `millennium`, `julian`, `isoyear`, `timezone`, `timezone_hour`, `timezone_minute`; `jdate_trunc`: everything but `year`, `quarter`, `month`, `day`) | | no |
+| `0A000` `feature_not_supported` | a recognised but unsupported unit (`jdate_part`/`EXTRACT`: `week`, `millennium`, `julian`, `isoyear`, `timezone`, `timezone_hour`, `timezone_minute`; `jdate_trunc`: everything but `year`, `quarter`, `month`, `week`, `day`) | | no |
 | `0A000` | `ALTER EXTENSION jdate SET SCHEMA` | the server | no |
 | `42883` `undefined_function` | an operator or function the type does not define, such as `jdate = date`, `jdate + interval`, `jdate + bigint`, `date_part('year', jdate)` | the server | no |
 | `42501` `insufficient_privilege` | `CREATE EXTENSION jdate` by a non-superuser | the server | no |
@@ -315,16 +315,25 @@ day in the range, and `dow` equals core's shifted to a Saturday start,
 Wednesday, `dow` 4 (core's is 3) and `isodow` 3. Because `dow`, `isodow` and
 `epoch` never go through the Jalali conversion, they also work where that
 conversion cannot: for infinity `EXTRACT` gives the same results as core (see
-[Infinity](#infinity)). `week`, `millennium`,
+[Infinity](#infinity)). In `jdate_part` and `EXTRACT`, `week`, `millennium`,
 `julian`, `isoyear`, `timezone`, `timezone_hour` and `timezone_minute` raise
-`0A000`; a name core does not know raises `22023`.
+`0A000` (`week` is supported by [`jdate_trunc`](#jdate_trunc)); a name core does not know raises `22023`.
 
 ## `jdate_trunc`
 
 `jdate_trunc(unit, jdate) returns jdate` for `year` (Farvardin 1), `quarter`
-(month 1, 4, 7 or 10, day 1), `month` (day 1) and `day` (unchanged). Any other
-unit is `0A000` (an unknown name is `22023`). An infinite value is returned
-unchanged for any recognised unit.
+(month 1, 4, 7 or 10, day 1), `month` (day 1), `week` (the Saturday on or
+before the day) and `day` (unchanged). Any other unit is `0A000` (an unknown
+name is `22023`). An infinite value is returned unchanged for any recognised
+unit.
+
+Weeks start on Saturday, consistent with the Saturday-first `dow`: the start of
+the week is the day minus its `dow`, so a Saturday truncates to itself and a
+Friday to the Saturday six days earlier. The start may fall in the previous
+month or year. For the first days of the range (-0061-01-01 and -0061-01-02,
+before the first Saturday) the week start is below the minimum `jdate` and is
+the same out-of-range error (`22008`) as other arithmetic past the edge; there
+is no clamping. The top edge needs no special case.
 
 ## `to_jdate`
 
