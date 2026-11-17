@@ -44,6 +44,19 @@ jdate_check_range(DateADT value)
 		jdate_range_error();
 }
 
+/*
+ * The text of a Jalali date, shared by jdate_out and jdate_format so the two
+ * cannot disagree: an optional "-", then the year as exactly four digits, then
+ * "-MM-DD". A plain %04d would pad the sign into the width ("-061" rather
+ * than "-0061"), so the magnitude is padded instead.
+ */
+static char *
+jdate_format_ymd(const JalaaliDate *jd)
+{
+	return psprintf("%s%04d-%02d-%02d", jd->jy < 0 ? "-" : "",
+					abs(jd->jy), jd->jm, jd->jd);
+}
+
 static JalaaliDate
 jdate_to_jalaali(DateADT value)
 {
@@ -228,11 +241,7 @@ jdate_out(PG_FUNCTION_ARGS)
 	{
 		JalaaliDate jd = jdate_to_jalaali(value);
 
-		/* %04d pads the sign into the width for a negative year (giving
-		 * "-061" rather than "-0061"); pad the magnitude instead so the
-		 * year is always exactly 4 digits regardless of sign. */
-		result = psprintf("%s%04d-%02d-%02d", jd.jy < 0 ? "-" : "",
-						   abs(jd.jy), jd.jm, jd.jd);
+		result = jdate_format_ymd(&jd);
 	}
 	PG_RETURN_CSTRING(result);
 }
@@ -662,10 +671,10 @@ jdate_format_timestamptz(PG_FUNCTION_ARGS)
 		char	   *time_str = DatumGetCString(DirectFunctionCall1(time_out,
 														  DirectFunctionCall1(timestamp_time, local_ts)));
 
-		result = psprintf("%04d-%02d-%02d %s", jd.jy, jd.jm, jd.jd, time_str);
+		result = psprintf("%s %s", jdate_format_ymd(&jd), time_str);
 	}
 	else
-		result = psprintf("%04d-%02d-%02d", jd.jy, jd.jm, jd.jd);
+		result = jdate_format_ymd(&jd);
 
 	PG_RETURN_TEXT_P(cstring_to_text(result));
 }
