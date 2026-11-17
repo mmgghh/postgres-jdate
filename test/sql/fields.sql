@@ -54,6 +54,12 @@ FROM (VALUES ('0000-05-15'), ('0009-05-15'), ('0010-05-15'), ('0019-05-15'),
              ('1399-05-15'), ('1400-05-15'), ('1409-05-15'), ('1410-05-15'),
              ('3177-12-29')) AS v(d);
 
+-- the documented examples side by side: the decade is a number (year / 10
+-- rounded down), never the first year of the decade, so there is no 1400
+SELECT jdate_part('year', d::jdate) AS year, jdate_part('decade', d::jdate) AS decade
+FROM (VALUES ('1403-05-15'), ('1400-01-01'), ('1399-12-29'),
+             ('0000-05-15'), ('-0001-05-15')) AS v(d);
+
 -- Jalali years below 0 follow core's decade numbering, which for the same
 -- (astronomical, year 0 exists) year number is floor(year / 10): decade 0 is
 -- years 0..9 and decade -1 is years -10..-1, so every decade has ten years.

@@ -124,8 +124,11 @@ SELECT jdate_part('year', '1403-05-15'::jdate);     -- 1403
 SELECT jdate_part('quarter', '1403-05-15'::jdate);  -- 2
 SELECT EXTRACT(month FROM '1403-05-15'::jdate);     -- 5
 SELECT jdate_trunc('month', '1403-05-15'::jdate);   -- 1403-05-01
--- decade is year / 10 rounded down, as in core (202 for 2024), not the
--- first year of the decade
+-- decade is a decade number (year / 10 rounded down, as in core: 202 for
+-- 2024), not the first year of the decade: 1403 and 1400 are both 140, 1399
+-- is 139, 0 is 0 and -1 is -1. A tool that reports the first year of the
+-- decade (such as jalali_utils, which gives 1400) is not the same thing; use
+-- jdate_part('decade', d) * 10 to get that
 SELECT jdate_part('decade', '1403-05-15'::jdate);   -- 140
 
 -- dow starts the week on Saturday (0 = Saturday .. 6 = Friday); dow + 1 is the

@@ -294,7 +294,7 @@ are not trimmed. For a finite day:
 | `day` | 1 to 31 | Jalali date |
 | `quarter` | 1 to 4: months 1-3, 4-6, 7-9, 10-12 | Jalali date |
 | `doy` | 1 to 366, the day of the Jalali year (Farvardin 1 is 1) | Jalali date |
-| `decade` | the year divided by 10, rounded down (like core: `202` for 2024): years 1400 to 1409 are `140`, 0 to 9 are `0`, -10 to -1 are `-1`, and `-61` is `-7` | Jalali year |
+| `decade` | the decade **number**, not the first year of the decade: the year divided by 10, rounded down (like core: `202` for 2024). 1403 is `140`, 1400 is `140`, 1399 is `139`, 0 is `0`, -1 is `-1`; years 1400 to 1409 are `140`, 0 to 9 are `0`, -10 to -1 are `-1`, and `-61` is `-7`. A "first year of the decade" value such as jalali_utils' `1400` is `decade * 10`, and is not what this returns | Jalali year |
 | `century` | years 1 to 100 are `1`, 1401 to 1500 are `15`, and years `-61` to `0` are `-1`; there is no century 0 (core's numbering) | Jalali year |
 | `dow` | 0 (Saturday) to 6 (Friday): the week starts on Saturday, so this is core's `dow` (Sunday 0) plus one, modulo 7; add 1 for a 1-based Saturday-first number | the day number, **calendar-agnostic** |
 | `isodow` | 1 (Monday) to 7 (Sunday): the ISO 8601 number, unchanged and equal to core's | the day number, **calendar-agnostic** |
