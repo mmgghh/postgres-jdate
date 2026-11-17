@@ -170,18 +170,19 @@ convert, so they are valid on every path (text, binary, the casts to and from
 `date`, `timestamp` and `timestamptz`, `to_jdate(±Infinity)`), sort after and
 before every finite day, and are unchanged by `jdate ± int`. `jdate - jdate`
 raises `22008` for an infinite operand, as core's `date` does. The field
-functions answer the same way core's `date` does. This applies to
-`jdate_part(unit, x)` (a `double precision`) and to `EXTRACT(unit FROM x)` (a
-`numeric`):
+functions answer differently for the two result types. `EXTRACT(unit FROM x)`
+(a `numeric`, which can hold infinity) answers the same way core's `date` does.
+`jdate_part(unit, x)` returns a `bigint`, which has no infinity, so it is
+`NULL` for every unit:
 
-| unit | `infinity` | `-infinity` |
-| --- | --- | --- |
-| `year`, `decade`, `century`, `epoch` | `Infinity` | `-Infinity` |
-| `month`, `day`, `quarter`, `doy`, `dow`, `isodow` | `NULL` | `NULL` |
-| `hour`, `minute`, `second`, `milliseconds`, `microseconds` | `NULL` | `NULL` |
+| unit | `EXTRACT` of `infinity` | `EXTRACT` of `-infinity` | `jdate_part` |
+| --- | --- | --- | --- |
+| `year`, `decade`, `century`, `epoch` | `Infinity` | `-Infinity` | `NULL` |
+| `month`, `day`, `quarter`, `doy`, `dow`, `isodow` | `NULL` | `NULL` | `NULL` |
+| `hour`, `minute`, `second`, `milliseconds`, `microseconds` | `NULL` | `NULL` | `NULL` |
 
-The units that only grow with time are infinite, the ones that cycle have no
-value. The time-of-day units are `0` for every finite `jdate`, but `NULL` for
+For `EXTRACT`, the units that only grow with time are infinite, the ones that
+cycle have no value. The time-of-day units are `0` for every finite `jdate`, but `NULL` for
 infinity. A unit `jdate_part` does not support (such as `week`) is still an
 error for infinity, as for any other value. `jdate_trunc` returns an infinite
 value unchanged, and `jdate_format(timestamptz)` returns `'infinity'` or
@@ -261,7 +262,7 @@ from `text` is core's generic I/O conversion (`'1403-01-01'::jdate::text`).
 
 | Function | Returns | Volatility | See |
 | --- | --- | --- | --- |
-| `jdate_part(text, jdate)` | `double precision` | `IMMUTABLE` | [Fields](#fields-extract-and-jdate_part) |
+| `jdate_part(text, jdate)` | `bigint` | `IMMUTABLE` | [Fields](#fields-extract-and-jdate_part) |
 | `pg_catalog.extract(text, jdate)` (the target of `EXTRACT(field FROM x)`) | `numeric` | `IMMUTABLE` | [Fields](#fields-extract-and-jdate_part) |
 | `jdate_trunc(text, jdate)` | `jdate` | `IMMUTABLE` | [`jdate_trunc`](#jdate_trunc) |
 | `to_jdate(double precision)` | `jdate` | `IMMUTABLE` | [`to_jdate`](#to_jdate) |
@@ -281,8 +282,12 @@ There are no `jdate` overloads of `date_part`, `date_trunc`, `to_char`,
 
 ## Fields: `EXTRACT` and `jdate_part`
 
-`jdate_part(unit, x)` returns `double precision`; `EXTRACT(unit FROM x)` calls
-`pg_catalog.extract(text, jdate)` and returns `numeric`, with the same value.
+`jdate_part(unit, x)` returns `bigint`: every field of a finite day is an exact
+integer, and every unit is `NULL` for infinity. `EXTRACT(unit FROM x)` calls
+`pg_catalog.extract(text, jdate)` and returns `numeric`, with the same value for
+a finite day (an exact integer, no rounding); for infinity it keeps core's
+`Infinity` / `-Infinity` for the units that only grow (see
+[Infinity](#infinity)). Both are `IMMUTABLE`, `STRICT` and `PARALLEL SAFE`.
 Unit names are decoded by core's unit table, so they are case-insensitive and
 core's abbreviations work (`y`, `mon`, `d`, `ms`); leading and trailing spaces
 are not trimmed. For a finite day:
@@ -298,7 +303,7 @@ are not trimmed. For a finite day:
 | `century` | years 1 to 100 are `1`, 1401 to 1500 are `15`, and years `-61` to `0` are `-1`; there is no century 0 (core's numbering) | Jalali year |
 | `dow` | 0 (Saturday) to 6 (Friday): the week starts on Saturday, so this is core's `dow` (Sunday 0) plus one, modulo 7; add 1 for a 1-based Saturday-first number | the day number, **calendar-agnostic** |
 | `isodow` | 1 (Monday) to 7 (Sunday): the ISO 8601 number, unchanged and equal to core's | the day number, **calendar-agnostic** |
-| `epoch` | seconds from 1970-01-01 00:00:00 UTC to the start of that day (negative before 1970), a multiple of 86400, exact in a `double` | the day number, **calendar-agnostic** |
+| `epoch` | seconds from 1970-01-01 00:00:00 UTC to the start of that day (negative before 1970), a multiple of 86400, an exact `bigint` (and an exact `numeric` through `EXTRACT`) | the day number, **calendar-agnostic** |
 | `hour`, `minute`, `second`, `milliseconds`, `microseconds` | `0` | |
 
 `isodow` and `epoch` equal core's answer (`date_part(unit, d::date)`) for every
@@ -307,7 +312,7 @@ day in the range, and `dow` equals core's shifted to a Saturday start,
 `isodow` is the ISO one, so the two numbers differ on every day: 1403-01-01 is a
 Wednesday, `dow` 4 (core's is 3) and `isodow` 3. Because `dow`, `isodow` and
 `epoch` never go through the Jalali conversion, they also work where that
-conversion cannot: for infinity they give the same results as core (see
+conversion cannot: for infinity `EXTRACT` gives the same results as core (see
 [Infinity](#infinity)). `week`, `millennium`,
 `julian`, `isoyear`, `timezone`, `timezone_hour` and `timezone_minute` raise
 `0A000`; a name core does not know raises `22023`.
@@ -366,8 +371,10 @@ functions are `STRICT` and `PARALLEL SAFE`, and the two aggregates are
 `PARALLEL = SAFE` with a combine function. 26 functions are `IMMUTABLE`; the
 three that depend on the session `TimeZone` are `STABLE`: `jdate(timestamptz)`, `timestamptz(jdate)`
 and `jdate_format(timestamptz, boolean)`. In particular `to_jdate` is
-`IMMUTABLE` (it is indexable), as are `jdate_part`, `extract(text, jdate)` and
-`jdate_trunc`.
+`IMMUTABLE` (it is indexable), as are `jdate_part` (`bigint`),
+`extract(text, jdate)` (`numeric`) and `jdate_trunc`; the `fields` test pins
+the return types with `pg_typeof` and the volatility and parallel safety of
+both field functions in `pg_proc`.
 
 The `parallel` test checks the catalog (no function or aggregate of the
 extension, nor an aggregate's transition function, is anything but `PARALLEL

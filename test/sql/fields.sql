@@ -31,6 +31,31 @@ SELECT EXTRACT(year FROM '1403-05-15'::jdate) AS extract_year;
 SELECT EXTRACT(month FROM '1403-05-15'::jdate) AS extract_month;
 SELECT pg_typeof(EXTRACT(year FROM '1403-05-15'::jdate)) AS extract_returns_numeric;
 
+-- return types: jdate_part is bigint for every unit, EXTRACT is numeric for
+-- every unit, finite or infinite
+SELECT f,
+       pg_typeof(jdate_part(f, '1403-05-15'::jdate)) AS part_type,
+       pg_typeof(EXTRACT(epoch FROM '1403-05-15'::jdate)) AS extract_type
+FROM (VALUES ('year'), ('month'), ('day'), ('quarter'), ('doy'), ('dow'),
+             ('isodow'), ('decade'), ('century'), ('epoch'), ('hour')) AS u(f)
+ORDER BY f;
+SELECT pg_typeof(jdate_part('epoch', 'infinity'::jdate)) AS part_inf_type,
+       pg_typeof(EXTRACT(epoch FROM 'infinity'::jdate)) AS extract_inf_type;
+SELECT proname, prorettype::regtype AS rettype, provolatile, proparallel
+FROM pg_proc
+WHERE proname IN ('jdate_part', 'extract')
+  AND proargtypes[1] = 'jdate'::regtype
+ORDER BY proname;
+
+-- epoch is an exact int64 (no float rounding), through both functions, at both
+-- edges of the range and on negative epochs
+SELECT d, jdate_part('epoch', d) AS part_epoch, EXTRACT(epoch FROM d) AS extract_epoch,
+       jdate_part('epoch', d) = date_part('epoch', d::date) AS same_as_core,
+       jdate_part('epoch', d) % 86400 AS not_whole_days
+FROM (VALUES ('-0061-01-01'::jdate), ('0001-01-01'), ('1348-10-11'), ('1403-01-01'),
+             ('3177-12-29')) AS v(d)
+ORDER BY d;
+
 -- confirm EXTRACT for pre-existing types is completely unaffected
 SELECT EXTRACT(year FROM date '2024-01-01') AS extract_year_date_unaffected;
 SELECT EXTRACT(year FROM timestamp '2024-01-01 00:00:00') AS extract_year_timestamp_unaffected;
@@ -84,8 +109,8 @@ WITH y AS (
 )
 SELECT count(*) AS years,
        count(*) FILTER (WHERE jdate_part('year', d) <> g) AS wrong_year,
-       count(*) FILTER (WHERE jdate_part('decade', d) <> floor(jdate_part('year', d) / 10)) AS not_floor_div,
-       count(*) FILTER (WHERE g >= 0 AND jdate_part('decade', d) <> trunc(jdate_part('year', d) / 10)) AS not_trunc_div,
+       count(*) FILTER (WHERE jdate_part('decade', d) <> floor(jdate_part('year', d)::numeric / 10)) AS not_floor_div,
+       count(*) FILTER (WHERE g >= 0 AND jdate_part('decade', d) <> trunc(jdate_part('year', d)::numeric / 10)) AS not_trunc_div,
        count(*) FILTER (WHERE jdate_part('decade', d) <> date_part('decade', core_d)) AS differs_from_core,
        count(*) FILTER (WHERE EXTRACT(decade FROM d) <> jdate_part('decade', d)::numeric) AS extract_differs
 FROM y;
@@ -146,19 +171,20 @@ FROM (SELECT g::date::jdate AS d
                            '3177-12-29'::jdate::date::timestamp,
                            interval '1 day') AS g) AS s;
 
--- infinity: epoch is +/-Infinity (it errored before)
+-- infinity: EXTRACT keeps +/-Infinity for epoch, jdate_part (bigint) is NULL
 SELECT EXTRACT(epoch FROM 'infinity'::jdate) AS extract_epoch_inf,
        EXTRACT(epoch FROM '-infinity'::jdate) AS extract_epoch_ninf;
 SELECT jdate_part('epoch', 'infinity'::jdate) AS part_epoch_inf,
        jdate_part('epoch', '-infinity'::jdate) AS part_epoch_ninf;
 
--- infinity: every supported unit gives the same answer as core's date, which
--- is NULL for the units that cycle (dow, isodow, month, day, quarter, doy) and
--- +/-Infinity for the ones that only grow (year, decade, century, epoch)
+-- infinity: jdate_part is NULL for every unit (a bigint has no infinity), where
+-- core's date gives NULL for the units that cycle (dow, isodow, month, day,
+-- quarter, doy) and +/-Infinity for the ones that only grow (year, decade,
+-- century, epoch); EXTRACT below keeps core's answers
 SELECT f, v,
        jdate_part(f, v::jdate) AS jdate_part,
        date_part(f, v::date) AS core_part,
-       jdate_part(f, v::jdate) IS NOT DISTINCT FROM date_part(f, v::date) AS part_same
+       jdate_part(f, v::jdate) IS NULL AS part_null
 FROM (VALUES ('dow'), ('isodow'), ('epoch'), ('year'), ('month'), ('day'),
              ('quarter'), ('doy'), ('decade'), ('century')) AS u(f),
      (VALUES ('infinity'), ('-infinity')) AS i(v)

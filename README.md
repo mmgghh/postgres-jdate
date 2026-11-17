@@ -120,9 +120,9 @@ SELECT '1403-01-10'::jdate - '1403-01-01'::jdate;   -- 9
 SELECT '3177-12-29'::jdate + 1;                     -- ERROR (SQLSTATE 22008)
 
 -- field access
-SELECT jdate_part('year', '1403-05-15'::jdate);     -- 1403
+SELECT jdate_part('year', '1403-05-15'::jdate);     -- 1403 (bigint)
 SELECT jdate_part('quarter', '1403-05-15'::jdate);  -- 2
-SELECT EXTRACT(month FROM '1403-05-15'::jdate);     -- 5
+SELECT EXTRACT(month FROM '1403-05-15'::jdate);     -- 5 (numeric)
 SELECT jdate_trunc('month', '1403-05-15'::jdate);   -- 1403-05-01
 -- decade is a decade number (year / 10 rounded down, as in core: 202 for
 -- 2024), not the first year of the decade: 1403 and 1400 are both 140, 1399
@@ -142,8 +142,10 @@ SELECT jdate_part('isodow', '1403-01-01'::jdate);   -- 3
 SELECT EXTRACT(epoch FROM '1403-01-01'::jdate);     -- 1710892800
 SELECT to_jdate(1710892800);                        -- 1403-01-01
 
--- infinity follows core's date (see Infinity below): units that only grow
--- give +/-Infinity, units that cycle give NULL
+-- jdate_part returns bigint (exact, epoch included) and is NULL for every unit
+-- on infinity; EXTRACT returns numeric and follows core's date (see Infinity
+-- below): units that only grow give +/-Infinity, units that cycle give NULL
+SELECT jdate_part('year', 'infinity'::jdate);       -- NULL
 SELECT EXTRACT(year FROM 'infinity'::jdate);        -- Infinity
 SELECT EXTRACT(century FROM '-infinity'::jdate);    -- -Infinity
 SELECT EXTRACT(month FROM 'infinity'::jdate);       -- NULL
@@ -185,7 +187,7 @@ checked against the sources, the tests, or a running cluster. The essentials:
 | Comparison | `=` `<>` `<` `<=` `>` `>=`; default btree and hash operator classes; `min()`/`max()` |
 | Arithmetic | `jdate + int`, `int + jdate`, `jdate - int`, `jdate - jdate` (days) |
 | Casts | all assignment-level: `date`, `timestamp`, `timestamptz` to and from `jdate` |
-| Fields | `EXTRACT(... FROM jdate)`, `jdate_part`, `jdate_trunc`; `to_jdate`, `jdate_format`; `dow` is Saturday-first (0 = Saturday .. 6 = Friday, `dow + 1` is 1-based), `isodow` is ISO 8601 (1 = Monday .. 7 = Sunday) |
+| Fields | `EXTRACT(... FROM jdate)` (numeric), `jdate_part` (bigint, NULL on infinity), `jdate_trunc`; `to_jdate`, `jdate_format`; `dow` is Saturday-first (0 = Saturday .. 6 = Friday, `dow + 1` is 1-based), `isodow` is ISO 8601 (1 = Monday .. 7 = Sunday) |
 | Errors | SQLSTATE `22007`, `22008`, `22023`, `0A000` (see [the table](docs/SPECIFICATION.md#errors-and-sqlstates)) |
 | Extension | version 1.0, **not relocatable**, superuser to install, `extract(text, jdate)` lives in `pg_catalog` |
 | PostgreSQL | 16 or later; the regression suite runs in CI on 16, 17 and 18 (the local harness is 18 only) |

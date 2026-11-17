@@ -613,15 +613,28 @@ jdate_unsupported_unit(void)
 }
 
 /*
+ * What a field of a jdate is: a finite integer, an infinite value (only for an
+ * infinite jdate and a unit that only grows), or NULL.
+ */
+typedef enum JdateFieldKind
+{
+	JDATE_FIELD_FINITE,
+	JDATE_FIELD_INFINITE,		/* *result is -1 (-Infinity) or +1 (Infinity) */
+	JDATE_FIELD_NULL
+} JdateFieldKind;
+
+/*
  * The field of an infinite jdate, decided before any Jalali conversion (there
  * is no calendar date to convert), with the same answers as core's date: the
  * units that only grow (year, decade, century, epoch) are +/-Infinity, and
  * every unit that cycles (month, day, quarter, doy, dow, isodow) is NULL. The
  * time-of-day units, which are 0 for every finite date, are NULL as well
  * (core's timestamp gives NULL for them too; core's date rejects them).
+ * jdate_part turns every infinite answer into NULL (it returns bigint);
+ * EXTRACT keeps the infinity.
  */
-static double
-jdate_get_infinite_field(DateADT value, int val, bool *isnull)
+static JdateFieldKind
+jdate_get_infinite_field(DateADT value, int val, int64 *result)
 {
 	switch (val)
 	{
@@ -629,8 +642,8 @@ jdate_get_infinite_field(DateADT value, int val, bool *isnull)
 		case DTK_DECADE:
 		case DTK_CENTURY:
 		case DTK_EPOCH:
-			return DATE_IS_NOBEGIN(value) ? -get_float8_infinity()
-				: get_float8_infinity();
+			*result = DATE_IS_NOBEGIN(value) ? -1 : 1;
+			return JDATE_FIELD_INFINITE;
 		case DTK_MONTH:
 		case DTK_DAY:
 		case DTK_QUARTER:
@@ -642,27 +655,25 @@ jdate_get_infinite_field(DateADT value, int val, bool *isnull)
 		case DTK_SECOND:
 		case DTK_MILLISEC:
 		case DTK_MICROSEC:
-			*isnull = true;
-			return 0;
+			*result = 0;
+			return JDATE_FIELD_NULL;
 		default:
 			jdate_unsupported_unit();
-			return 0;			/* keep compiler quiet */
+			return JDATE_FIELD_NULL;	/* keep compiler quiet */
 	}
 }
 
 /*
- * The value of field "val" of a jdate, or NULL (*isnull set) when the field
- * has no value for infinity.
+ * Field "val" of a jdate as an exact int64 in *result, with the kind telling
+ * whether it is a finite value, an infinity or NULL.
  */
-static double
-jdate_get_field(DateADT value, int val, bool *isnull)
+static JdateFieldKind
+jdate_get_field(DateADT value, int val, int64 *result)
 {
 	JalaaliDate jd;
 
-	*isnull = false;
-
 	if (DATE_NOT_FINITE(value))
-		return jdate_get_infinite_field(value, val, isnull);
+		return jdate_get_infinite_field(value, val, result);
 
 	/*
 	 * Day-of-week and epoch do not depend on which calendar the date is read
@@ -674,17 +685,20 @@ jdate_get_field(DateADT value, int val, bool *isnull)
 	switch (val)
 	{
 		case DTK_DOW:
-			return (j2day(value + POSTGRES_EPOCH_JDATE) + 1) % 7;
+			*result = (j2day(value + POSTGRES_EPOCH_JDATE) + 1) % 7;
+			return JDATE_FIELD_FINITE;
 		case DTK_ISODOW:
 			{
 				int			dow = j2day(value + POSTGRES_EPOCH_JDATE);
 
-				return (dow == 0) ? 7 : dow;
+				*result = (dow == 0) ? 7 : dow;
+				return JDATE_FIELD_FINITE;
 			}
 		case DTK_EPOCH:
-			/* Seconds since 1970-01-01 UTC, exact in a double for this range */
-			return (double) (((int64) value + POSTGRES_EPOCH_JDATE -
-							  UNIX_EPOCH_JDATE) * SECS_PER_DAY);
+			/* Seconds since 1970-01-01 UTC, exact in an int64 */
+			*result = ((int64) value + POSTGRES_EPOCH_JDATE -
+					   UNIX_EPOCH_JDATE) * SECS_PER_DAY;
+			return JDATE_FIELD_FINITE;
 		default:
 			break;
 	}
@@ -694,17 +708,22 @@ jdate_get_field(DateADT value, int val, bool *isnull)
 	switch (val)
 	{
 		case DTK_YEAR:
-			return jd.jy;
+			*result = jd.jy;
+			break;
 		case DTK_MONTH:
-			return jd.jm;
+			*result = jd.jm;
+			break;
 		case DTK_DAY:
-			return jd.jd;
+			*result = jd.jd;
+			break;
 		case DTK_QUARTER:
-			return (jd.jm - 1) / 3 + 1;
+			*result = (jd.jm - 1) / 3 + 1;
+			break;
 		case DTK_DOY:
-			return (jd.jm <= 6)
+			*result = (jd.jm <= 6)
 				? (jd.jm - 1) * 31 + jd.jd
 				: 186 + (jd.jm - 7) * 30 + jd.jd;
+			break;
 		case DTK_DECADE:
 			/*
 			 * The decade number, not its first year (core: decade 202 is
@@ -713,25 +732,29 @@ jdate_get_field(DateADT value, int val, bool *isnull)
 			 * division truncates, so negative years are rounded down
 			 * explicitly. Decade 0 is years 0..9, decade -1 is years -10..-1.
 			 */
-			return (jd.jy >= 0)
+			*result = (jd.jy >= 0)
 				? jd.jy / 10
 				: -(((-jd.jy) + 9) / 10);
+			break;
 		case DTK_CENTURY:
-			return (jd.jy >= 1)
+			*result = (jd.jy >= 1)
 				? (jd.jy + 99) / 100
 				: -(((-jd.jy) + 100) / 100);
+			break;
 		case DTK_HOUR:
 		case DTK_MINUTE:
 		case DTK_SECOND:
 		case DTK_MILLISEC:
 		case DTK_MICROSEC:
-			return 0;
+			*result = 0;
+			break;
 		default:
 			jdate_unsupported_unit();
-			return 0;			/* keep compiler quiet */
 	}
+	return JDATE_FIELD_FINITE;
 }
 
+/* jdate_part(text, jdate) RETURNS bigint: NULL for every unit on infinity */
 PG_FUNCTION_INFO_V1(jdate_part);
 Datum
 jdate_part(PG_FUNCTION_ARGS)
@@ -739,14 +762,17 @@ jdate_part(PG_FUNCTION_ARGS)
 	text	   *units = PG_GETARG_TEXT_PP(0);
 	DateADT		value = PG_GETARG_DATEADT(1);
 	int			val = jdate_decode_field(fcinfo, units);
-	bool		isnull;
-	double		result = jdate_get_field(value, val, &isnull);
+	int64		result;
 
-	if (isnull)
+	if (jdate_get_field(value, val, &result) != JDATE_FIELD_FINITE)
 		PG_RETURN_NULL();
-	PG_RETURN_FLOAT8(result);
+	PG_RETURN_INT64(result);
 }
 
+/*
+ * extract(text, jdate) RETURNS numeric: an exact integer for finite values,
+ * +/-Infinity for the growing units on infinity, NULL for the cycling ones.
+ */
 PG_FUNCTION_INFO_V1(jdate_extract);
 Datum
 jdate_extract(PG_FUNCTION_ARGS)
@@ -754,12 +780,20 @@ jdate_extract(PG_FUNCTION_ARGS)
 	text	   *units = PG_GETARG_TEXT_PP(0);
 	DateADT		value = PG_GETARG_DATEADT(1);
 	int			val = jdate_decode_field(fcinfo, units);
-	bool		isnull;
-	double		result = jdate_get_field(value, val, &isnull);
+	int64		result;
 
-	if (isnull)
-		PG_RETURN_NULL();
-	return DirectFunctionCall1(float8_numeric, Float8GetDatum(result));
+	switch (jdate_get_field(value, val, &result))
+	{
+		case JDATE_FIELD_FINITE:
+			PG_RETURN_NUMERIC(int64_to_numeric(result));
+		case JDATE_FIELD_INFINITE:
+			return DirectFunctionCall1(float8_numeric,
+									   Float8GetDatum(result < 0
+													  ? -get_float8_infinity()
+													  : get_float8_infinity()));
+		default:
+			PG_RETURN_NULL();
+	}
 }
 
 PG_FUNCTION_INFO_V1(jdate_trunc);

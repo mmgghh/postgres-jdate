@@ -242,7 +242,10 @@ CREATE FUNCTION to_jdate(double precision) RETURNS jdate
 -- Field access: jdate_part / extract() / jdate_trunc
 -- ============================================================
 
-CREATE FUNCTION jdate_part(text, jdate) RETURNS float8
+-- jdate_part returns bigint: every field of a finite date is an exact integer
+-- (epoch included), and every unit is NULL for infinity. EXTRACT below stays
+-- numeric and keeps +/-Infinity for the units that only grow.
+CREATE FUNCTION jdate_part(text, jdate) RETURNS bigint
     AS 'MODULE_PATHNAME', 'jdate_part' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- EXTRACT(field FROM source) desugars to a *schema-qualified* call to
