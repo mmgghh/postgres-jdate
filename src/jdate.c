@@ -6,6 +6,7 @@
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
+#include "utils/float.h"
 #include "utils/fmgrprotos.h"
 #include "utils/numeric.h"
 #include "varatt.h"	/* split out of postgres.h in PostgreSQL 16 */
@@ -549,10 +550,90 @@ jdate_decode_field(text *units)
 	return val;
 }
 
-static double
-jdate_get_field(DateADT value, int val)
+static void
+jdate_unsupported_unit(void)
 {
-	JalaaliDate jd = jdate_to_jalaali(value);
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("unit not supported for jdate_part/extract")));
+}
+
+/*
+ * The field of an infinite jdate, decided before any Jalali conversion (there
+ * is no calendar date to convert), with the same answers as core's date: the
+ * units that only grow (year, decade, century, epoch) are +/-Infinity, and
+ * every unit that cycles (month, day, quarter, doy, dow, isodow) is NULL. The
+ * time-of-day units, which are 0 for every finite date, are NULL as well
+ * (core's timestamp gives NULL for them too; core's date rejects them).
+ */
+static double
+jdate_get_infinite_field(DateADT value, int val, bool *isnull)
+{
+	switch (val)
+	{
+		case DTK_YEAR:
+		case DTK_DECADE:
+		case DTK_CENTURY:
+		case DTK_EPOCH:
+			return DATE_IS_NOBEGIN(value) ? -get_float8_infinity()
+				: get_float8_infinity();
+		case DTK_MONTH:
+		case DTK_DAY:
+		case DTK_QUARTER:
+		case DTK_DOY:
+		case DTK_DOW:
+		case DTK_ISODOW:
+		case DTK_HOUR:
+		case DTK_MINUTE:
+		case DTK_SECOND:
+		case DTK_MILLISEC:
+		case DTK_MICROSEC:
+			*isnull = true;
+			return 0;
+		default:
+			jdate_unsupported_unit();
+			return 0;			/* keep compiler quiet */
+	}
+}
+
+/*
+ * The value of field "val" of a jdate, or NULL (*isnull set) when the field
+ * has no value for infinity.
+ */
+static double
+jdate_get_field(DateADT value, int val, bool *isnull)
+{
+	JalaaliDate jd;
+
+	*isnull = false;
+
+	if (DATE_NOT_FINITE(value))
+		return jdate_get_infinite_field(value, val, isnull);
+
+	/*
+	 * Day-of-week and epoch do not depend on which calendar the date is read
+	 * through, so they come straight from the day number, never from the
+	 * Jalali fields.
+	 */
+	switch (val)
+	{
+		case DTK_DOW:
+			return j2day(value + POSTGRES_EPOCH_JDATE);
+		case DTK_ISODOW:
+			{
+				int			dow = j2day(value + POSTGRES_EPOCH_JDATE);
+
+				return (dow == 0) ? 7 : dow;
+			}
+		case DTK_EPOCH:
+			/* Seconds since 1970-01-01 UTC, exact in a double for this range */
+			return (double) (((int64) value + POSTGRES_EPOCH_JDATE -
+							  UNIX_EPOCH_JDATE) * SECS_PER_DAY);
+		default:
+			break;
+	}
+
+	jd = jdate_to_jalaali(value);
 
 	switch (val)
 	{
@@ -589,27 +670,8 @@ jdate_get_field(DateADT value, int val)
 		case DTK_MILLISEC:
 		case DTK_MICROSEC:
 			return 0;
-		case DTK_DOW:
-		case DTK_ISODOW:
-			/* Day-of-week doesn't depend on which calendar you read the
-			 * date through, so reuse core's own (Gregorian-side) answer
-			 * for the identical underlying day. */
-			return DatumGetFloat8(DirectFunctionCall1(numeric_float8,
-													   DirectFunctionCall2(extract_date,
-																			PointerGetDatum(cstring_to_text(val == DTK_DOW ? "dow" : "isodow")),
-																			DateADTGetDatum(value))));
-		case DTK_EPOCH:
-			/* Likewise calendar-agnostic: a Unix timestamp counts seconds
-			 * since 1970-01-01 UTC regardless of which calendar the date
-			 * is displayed in, so this is the same day for both. */
-			return DatumGetFloat8(DirectFunctionCall1(numeric_float8,
-													   DirectFunctionCall2(extract_date,
-																			PointerGetDatum(cstring_to_text("epoch")),
-																			DateADTGetDatum(value))));
 		default:
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("unit not supported for jdate_part/extract")));
+			jdate_unsupported_unit();
 			return 0;			/* keep compiler quiet */
 	}
 }
@@ -621,8 +683,12 @@ jdate_part(PG_FUNCTION_ARGS)
 	text	   *units = PG_GETARG_TEXT_PP(0);
 	DateADT		value = PG_GETARG_DATEADT(1);
 	int			val = jdate_decode_field(units);
+	bool		isnull;
+	double		result = jdate_get_field(value, val, &isnull);
 
-	PG_RETURN_FLOAT8(jdate_get_field(value, val));
+	if (isnull)
+		PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(result);
 }
 
 PG_FUNCTION_INFO_V1(jdate_extract);
@@ -632,8 +698,11 @@ jdate_extract(PG_FUNCTION_ARGS)
 	text	   *units = PG_GETARG_TEXT_PP(0);
 	DateADT		value = PG_GETARG_DATEADT(1);
 	int			val = jdate_decode_field(units);
-	double		result = jdate_get_field(value, val);
+	bool		isnull;
+	double		result = jdate_get_field(value, val, &isnull);
 
+	if (isnull)
+		PG_RETURN_NULL();
 	return DirectFunctionCall1(float8_numeric, Float8GetDatum(result));
 }
 
