@@ -168,6 +168,75 @@ SELECT jdate_format('-infinity'::timestamptz, false);                     -- -in
 SELECT jdate_format(now());                         -- the current moment (varies)
 ```
 
+## Time zones
+
+A `jdate` is a calendar day and has no time zone. A time zone only matters
+where an instant (`timestamptz`, a Unix epoch) meets a day. The table says
+which zone each such place uses; nothing else in the extension looks at a zone.
+
+| Zone used | Where |
+| --- | --- |
+| the session `TimeZone` | `timestamptz` to `jdate` and `jdate` to `timestamptz` casts, `jdate_format`, and `to_timestamp(e)::jdate` |
+| a zone you name | `to_jdate(e, zone)` |
+| none | `to_jdate(e)` (the UTC day), `EXTRACT(epoch FROM ...)`, every other function, operator and cast |
+
+The knob is PostgreSQL's own `timezone` setting: set it per session with
+`SET timezone`, or make it the default for a database or a role with
+`ALTER DATABASE ... SET timezone` and `ALTER ROLE ... SET timezone`. There is
+no extension-specific setting. Every result below was produced on PostgreSQL 18
+with `psql` defaults, in order, in one database named `mydb` (the instant
+`2024-03-19 22:00:00+00` is 01:30 on 2024-03-20 in Tehran, which is
+1403-01-01):
+
+```sql
+-- the same instant is a different Jalali day in different session zones
+SET timezone = 'UTC';
+SELECT timestamptz '2024-03-19 22:00:00+00'::jdate;          -- 1402-12-29
+SET timezone = 'Asia/Tehran';
+SELECT timestamptz '2024-03-19 22:00:00+00'::jdate;          -- 1403-01-01
+SELECT jdate_format(timestamptz '2024-03-19 22:00:00+00');   -- 1403-01-01 01:30:00
+SELECT '1403-01-01'::jdate::timestamptz;                     -- 2024-03-20 00:00:00+03:30
+
+-- to_jdate(e) is the UTC day, whatever the session zone is (1710885600 is the
+-- same instant, as a Unix epoch); to_jdate(e, zone) takes the day in the zone
+-- you name, whatever the session zone is
+SELECT to_jdate(1710885600);                                 -- 1402-12-29
+SELECT to_jdate(1710885600, 'Asia/Tehran');                  -- 1403-01-01
+SELECT to_jdate(1710885600, 'America/New_York');             -- 1402-12-29
+SELECT to_timestamp(1710885600)::jdate;                      -- 1403-01-01 (the session zone is Asia/Tehran)
+SELECT to_jdate(1710885600, 'Asia/Tehran') = to_timestamp(1710885600)::jdate;  -- t
+
+-- an unknown zone is core's error (SQLSTATE 22023); infinity needs no zone
+SELECT to_jdate(1710885600, 'No/Such_Zone');                 -- ERROR: time zone "No/Such_Zone" not recognized
+SELECT to_jdate('infinity', 'Asia/Tehran');                  -- infinity
+
+-- epochs never depend on the zone: an instant has one epoch, a jdate's epoch
+-- is midnight UTC of that day
+SELECT EXTRACT(epoch FROM '1403-01-01'::jdate);                       -- 1710892800
+SELECT EXTRACT(epoch FROM timestamptz '2024-03-19 22:00:00+00');      -- 1710885600.000000
+
+-- the default for a database or a role (new sessions pick it up; a database
+-- setting is overridden by a role-in-database setting, and either by SET)
+ALTER DATABASE mydb SET timezone = 'Asia/Tehran';
+ALTER ROLE app_user IN DATABASE mydb SET timezone = 'America/New_York';
+```
+
+`to_jdate(e, zone)` is `IMMUTABLE`, like core's `timezone(text, timestamptz)`
+that it is built on, so unlike the casts above it can be used in an index
+expression (the answer depends on the time zone database, not on a setting that
+can change between sessions). The full table, function by function, is in
+[the specification](docs/SPECIFICATION.md#time-zones).
+
+### Coming from jalali_utils
+
+jalali_utils hardcodes `Asia/Tehran`. To get the same days here, either set
+the zone once, `SET timezone = 'Asia/Tehran'` (or make it the default for the
+database or role as above) and use the `timestamptz` casts, or name it on each
+call with `to_jdate(e, 'Asia/Tehran')`. The one-argument `to_jdate(e)` is the
+UTC day instead, which differs from the Tehran day for instants in the first
+3 hours 30 minutes of each Tehran day (Tehran is at UTC+3:30; the example
+above is 01:30 there).
+
 ## Specification
 
 The full specification is in [docs/SPECIFICATION.md](docs/SPECIFICATION.md): the

@@ -14,6 +14,7 @@ covered.
 - [Operators](#operators) and [Casts](#casts)
 - [Functions](#functions), [Fields: `EXTRACT` and `jdate_part`](#fields-extract-and-jdate_part),
   [`jdate_trunc`](#jdate_trunc), [`to_jdate`](#to_jdate) and [`jdate_format`](#jdate_format)
+- [Time zones](#time-zones)
 - [Indexing, hashing and partitioning](#indexing-hashing-and-partitioning)
 - [Function volatility and parallel safety](#function-volatility-and-parallel-safety)
 - [Extension properties](#extension-properties)
@@ -81,7 +82,7 @@ could never be displayed can never be stored:
 - binary input (`COPY ... (FORMAT binary)`, binary-protocol parameters);
 - arithmetic: `jdate + int`, `int + jdate` and `jdate - int`;
 - the `date`, `timestamp` and `timestamptz` casts to `jdate`;
-- `to_jdate(double precision)`, which also rejects `NaN`.
+- `to_jdate(double precision)` and `to_jdate(double precision, text)`, which also reject `NaN`.
 
 Each raises SQLSTATE `22008` (`datetime_value_out_of_range`) and the statement
 stores nothing; text that cannot be read as a year-month-day triple at all
@@ -266,6 +267,7 @@ from `text` is core's generic I/O conversion (`'1403-01-01'::jdate::text`).
 | `pg_catalog.extract(text, jdate)` (the target of `EXTRACT(field FROM x)`) | `numeric` | `IMMUTABLE` | [Fields](#fields-extract-and-jdate_part) |
 | `jdate_trunc(text, jdate)` | `jdate` | `IMMUTABLE` | [`jdate_trunc`](#jdate_trunc) |
 | `to_jdate(double precision)` | `jdate` | `IMMUTABLE` | [`to_jdate`](#to_jdate) |
+| `to_jdate(double precision, zone text)` | `jdate` | `IMMUTABLE` | [`to_jdate`](#to_jdate) |
 | `jdate_format(timestamptz, with_time boolean DEFAULT true)` | `text` | `STABLE` | [`jdate_format`](#jdate_format) |
 | `jdate(date)`, `jdate(timestamp)`, `jdate(timestamptz)`, `"timestamp"(jdate)`, `timestamptz(jdate)` | | see [Casts](#casts) | the cast functions |
 | `min(jdate)`, `max(jdate)` | `jdate` | aggregates | [Indexing](#indexing-hashing-and-partitioning) |
@@ -339,6 +341,24 @@ division floors, so `to_jdate(-0.5)` is the day before the Unix epoch
 `to_timestamp(x)::jdate`, which takes the day in the session zone, is in
 [Usage](../README.md#usage).
 
+`to_jdate(double precision, zone text)` takes the day in a zone you name
+instead: the instant is converted to local time in `zone` by core's
+`timestamptz` `AT TIME ZONE` conversion, the local calendar day is taken, and it is
+range-checked. The session `TimeZone` plays no part. It is `IMMUTABLE`, `STRICT`
+and `PARALLEL SAFE`, the same as core's `timezone(text, timestamptz)` in
+`pg_catalog` (checked in `pg_proc`; the `tz_casts` test compares them). Order of
+checks: `NaN` and an epoch outside the range above are `22008` first, judged on
+the UTC instant, before the zone is used; so the first second of `-0061-01-01`
+UTC fails in `America/New_York` (its local day is before the range) and the
+last second of `3177-12-29` UTC fails in `Pacific/Kiritimati` (UTC+14, its
+local day is after the range), and a finite epoch just outside the range fails
+even where the local day would fit. `±Infinity` gives `±infinity` before the
+zone is looked up, so it succeeds even for a zone name that does not exist; for
+a finite epoch an unknown zone raises core's `22023`
+(`time zone "..." not recognized`). A `NULL` argument gives `NULL`. For
+ordinary instants it agrees with `(to_timestamp(e) AT TIME ZONE zone)::date`
+converted to `jdate` (the `tz_casts` test compares them over a year in five zones).
+
 ## `jdate_format`
 
 `jdate_format(timestamptz, with_time boolean DEFAULT true)` returns `text`: the
@@ -349,6 +369,44 @@ zone offset). With `with_time = false` it is just the date, the same text as
 `jdate_out`. It is `STABLE` because it depends on the `TimeZone`. Infinite
 timestamps give `infinity` / `-infinity`; a day outside the Jalali range raises
 `22008`. It is a bridge until a native Jalali timestamp type exists.
+
+## Time zones
+
+A `jdate` is a day and has no zone. The zone matters only where an instant
+(`timestamptz` or a Unix epoch) is turned into a day or a day into an instant.
+Which zone each function or cast uses:
+
+| Function or cast | Zone used | Result |
+| --- | --- | --- |
+| `timestamptz -> jdate` (`jdate(timestamptz)`) | session `TimeZone` | the local day |
+| `jdate -> timestamptz` (`timestamptz(jdate)`) | session `TimeZone` | local midnight of that day |
+| `jdate_format(timestamptz, boolean)` | session `TimeZone` | the local day and (optionally) local time of day |
+| `to_timestamp(e)::jdate` (core's function, then the cast) | session `TimeZone` | the local day |
+| `to_jdate(e, zone)` | the zone named in the argument | the day in that zone |
+| `to_jdate(e)` | none: UTC | the UTC day |
+| `EXTRACT(epoch FROM jdate)`, `jdate_part('epoch', jdate)` | none: UTC | midnight UTC of the day, a multiple of 86400 |
+| `EXTRACT(epoch FROM timestamptz)` (core) | none | the instant's epoch; the same in every zone |
+| `jdate -> timestamp`, `timestamp -> jdate`, `date -> jdate`, `jdate -> date` | none | the same calendar day; a `timestamp` has no zone and its time of day is dropped or set to midnight |
+| `jdate_part`, `EXTRACT` (every other field), `jdate_trunc` | none | fields of the day itself; `hour` and smaller are `0` |
+| text input and output, binary I/O, operators, arithmetic, `jdate - jdate`, `min`, `max`, hashing | none | |
+
+The setting that controls "session `TimeZone`" is PostgreSQL's `timezone`
+(`TimeZone`) parameter. It can be set per session (`SET timezone = ...`), or as
+the default for a database or a role (`ALTER DATABASE ... SET timezone = ...`,
+`ALTER ROLE ... [IN DATABASE ...] SET timezone = ...`); the usual precedence
+applies (a `SET` in the session, then a role-in-database setting, a role
+setting, a database setting, and the server's `postgresql.conf`). There is no
+extension-specific zone setting and no default zone for `to_jdate`.
+
+Because of that dependency, `jdate(timestamptz)`, `timestamptz(jdate)` and
+`jdate_format` are `STABLE`; every function in the "none" and "named zone" rows
+is `IMMUTABLE` (see [Function volatility](#function-volatility-and-parallel-safety)).
+Worked examples, each run on the development cluster, are in the README's
+[Time zones](../README.md#time-zones): the instant `2024-03-19 22:00:00+00`
+(Unix epoch `1710885600`) is `1402-12-29` in `UTC` and in `America/New_York`
+and `1403-01-01` (01:30) in `Asia/Tehran`; `to_jdate(1710885600)` is
+`1402-12-29`, `to_jdate(1710885600, 'Asia/Tehran')` is `1403-01-01`, and
+`to_timestamp(1710885600)::jdate` is whichever the session zone says.
 
 ## Indexing, hashing and partitioning
 
@@ -366,12 +424,12 @@ ordering operators use the `scalar*sel` estimators. `min`/`max` declare
 
 ## Function volatility and parallel safety
 
-As declared in `jdate--1.0.sql` (and checked against `pg_proc`): all 29
+As declared in `jdate--1.0.sql` (and checked against `pg_proc`): all 30
 functions are `STRICT` and `PARALLEL SAFE`, and the two aggregates are
-`PARALLEL = SAFE` with a combine function. 26 functions are `IMMUTABLE`; the
+`PARALLEL = SAFE` with a combine function. 27 functions are `IMMUTABLE`; the
 three that depend on the session `TimeZone` are `STABLE`: `jdate(timestamptz)`, `timestamptz(jdate)`
-and `jdate_format(timestamptz, boolean)`. In particular `to_jdate` is
-`IMMUTABLE` (it is indexable), as are `jdate_part` (`bigint`),
+and `jdate_format(timestamptz, boolean)`. In particular both `to_jdate` functions are
+`IMMUTABLE` (they are indexable), as are `jdate_part` (`bigint`),
 `extract(text, jdate)` (`numeric`) and `jdate_trunc`; the `fields` test pins
 the return types with `pg_typeof` and the volatility and parallel safety of
 both field functions in `pg_proc`.
