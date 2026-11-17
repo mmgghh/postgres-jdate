@@ -1,0 +1,181 @@
+-- Parallel query: every function and aggregate of the extension is marked
+-- PARALLEL SAFE, so the planner may put them under a Gather node, and the
+-- answer must not depend on whether it does. Part (a) checks the catalog,
+-- part (b) checks that the planner really chooses a parallel plan for each
+-- kind of query, part (c) checks that serial and parallel plans agree.
+--
+-- Output is stable across servers: EXPLAIN text is never printed, only
+-- booleans, and checksums are compared inside the test, never printed.
+-- If Gather is not chosen on some server version, fall back to
+-- SET debug_parallel_query = on (it exists since 16) for that query; do not
+-- loosen the check.
+
+SET DateStyle = 'ISO, YMD';
+SET timezone = 'UTC';
+
+-- ---------------------------------------------------------------------
+-- (a) every function and aggregate that belongs to the extension is
+-- PARALLEL SAFE (proparallel = 's'); offenders are printed, none expected
+-- ---------------------------------------------------------------------
+SELECT p.oid::regprocedure AS not_parallel_safe, p.proparallel
+FROM pg_proc p
+JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+                AND d.deptype = 'e'
+                AND d.refclassid = 'pg_extension'::regclass
+                AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'jdate')
+WHERE p.proparallel <> 's'
+ORDER BY 1;
+
+-- aggregates: the aggregate itself and its transition function
+SELECT a.aggfnoid::regprocedure AS aggregate_not_safe, p.proparallel, s.proparallel AS sfunc_parallel
+FROM pg_aggregate a
+JOIN pg_proc p ON p.oid = a.aggfnoid
+JOIN pg_proc s ON s.oid = a.aggtransfn
+JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+                AND d.deptype = 'e'
+                AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'jdate')
+WHERE p.proparallel <> 's' OR s.proparallel <> 's'
+ORDER BY 1;
+
+-- the checks above are not vacuous: they looked at functions and at the
+-- two aggregates min(jdate) and max(jdate)
+SELECT count(*) > 20 AS functions_checked,
+       count(*) FILTER (WHERE p.prokind = 'a') AS aggregates_checked
+FROM pg_proc p
+JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+                AND d.deptype = 'e'
+                AND d.refclassid = 'pg_extension'::regclass
+                AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'jdate');
+
+-- ---------------------------------------------------------------------
+-- data: 200000 rows over 30000 distinct days, as jdate and as date
+-- ---------------------------------------------------------------------
+CREATE TABLE par_t AS
+    SELECT i AS id, dt, dt::jdate AS d
+    FROM (SELECT i, DATE '1970-01-01' + (i % 30000) AS dt
+          FROM generate_series(1, 200000) i) s;
+-- a small table with one row per day, to join against
+CREATE TABLE par_u AS
+    SELECT dt::jdate AS d, n % 7 AS w
+    FROM (SELECT n, DATE '1970-01-01' + n AS dt FROM generate_series(0, 29999) n) s;
+ANALYZE par_t;
+ANALYZE par_u;
+ALTER TABLE par_t SET (parallel_workers = 2);
+ALTER TABLE par_u SET (parallel_workers = 2);
+
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET min_parallel_index_scan_size = 0;
+SET max_parallel_workers_per_gather = 2;
+-- the join is a Hash Join in both the serial and the parallel run
+SET enable_mergejoin = off;
+SET enable_nestloop = off;
+
+-- Each query returns one text column v. node is a plan node that must also
+-- appear (Gather Merge for ORDER BY, Hash Join for the join). ordered means
+-- the query has a total ORDER BY, so the checksum also covers row order.
+CREATE TABLE par_queries (label text PRIMARY KEY, query text NOT NULL, node text, ordered boolean NOT NULL DEFAULT false);
+INSERT INTO par_queries VALUES
+    ('1 filter',
+     $q$SELECT id::text FROM par_t WHERE d > '1400-01-01' AND d <= '1400-12-29'$q$,
+     NULL, false),
+    ('2 plus_int',
+     $q$SELECT id::text || ':' || (d + 10)::text FROM par_t$q$,
+     NULL, false),
+    ('3 jdate_part',
+     $q$SELECT id::text || ':' || jdate_part('year', d)::text || ':' || jdate_part('dow', d)::text FROM par_t$q$,
+     NULL, false),
+    ('4 jdate_trunc',
+     $q$SELECT id::text || ':' || jdate_trunc('month', d)::text FROM par_t$q$,
+     NULL, false),
+    ('5 jdate_format',
+     $q$SELECT id::text || ':' || jdate_format(dt::timestamptz, false) FROM par_t$q$,
+     NULL, false),
+    ('6 min_max',
+     $q$SELECT min(d)::text || ' ' || max(d)::text FROM par_t$q$,
+     NULL, false),
+    ('7 min_max_grouped',
+     $q$SELECT (id % 50)::text || ':' || min(d)::text || ':' || max(d)::text FROM par_t GROUP BY id % 50$q$,
+     NULL, false),
+    ('8 order_by',
+     $q$SELECT d::text || ':' || id::text FROM par_t ORDER BY d, id$q$,
+     'Gather Merge', true),
+    ('9 hash_join',
+     $q$SELECT t.id::text || ':' || u.w::text FROM par_t t JOIN par_u u ON t.d = u.d$q$,
+     'Hash Join', false);
+
+-- true when the EXPLAIN output of the query has a line containing node
+CREATE FUNCTION par_plan_has(query text, node text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS off) ' || query LOOP
+        IF position(node IN line) > 0 THEN
+            RETURN true;
+        END IF;
+    END LOOP;
+    RETURN false;
+END
+$$;
+
+-- ---------------------------------------------------------------------
+-- (b) the planner picks a parallel plan for each kind of query
+-- ---------------------------------------------------------------------
+SELECT label,
+       par_plan_has(query, 'Gather') AS has_gather,
+       (node IS NULL OR par_plan_has(query, node)) AS has_expected_node
+FROM par_queries
+ORDER BY label;
+
+-- ---------------------------------------------------------------------
+-- (c) the same checksum with parallelism off and on
+-- ---------------------------------------------------------------------
+CREATE TABLE par_results (label text, workers int, cnt bigint, mn text, mx text, sum text);
+
+-- Run as CREATE TABLE AS through EXECUTE: a plpgsql FOR loop or an EXECUTE
+-- ... INTO fetches a limited number of rows and so would never go parallel.
+DO $do$
+DECLARE
+    w int;
+    q record;
+BEGIN
+    FOREACH w IN ARRAY ARRAY[0, 2] LOOP
+        PERFORM set_config('max_parallel_workers_per_gather', w::text, false);
+        FOR q IN SELECT label, query, ordered FROM par_queries ORDER BY label LOOP
+            EXECUTE format(
+                'CREATE TEMP TABLE par_tmp AS '
+                'SELECT count(*) AS cnt, min(v) AS mn, max(v) AS mx, '
+                '       md5(string_agg(v, '','' %s)) AS sum '
+                'FROM (%s) s(v)',
+                CASE WHEN q.ordered THEN '' ELSE 'ORDER BY v' END,
+                q.query);
+            INSERT INTO par_results
+                SELECT q.label, w, cnt, mn, mx, sum FROM par_tmp;
+            DROP TABLE par_tmp;
+        END LOOP;
+    END LOOP;
+END
+$do$;
+
+SELECT label,
+       count(*) AS runs,
+       bool_and(cnt > 0) AS nonempty,
+       count(DISTINCT (cnt, mn, mx, sum)) = 1 AS equal
+FROM par_results
+GROUP BY label
+ORDER BY label;
+
+RESET max_parallel_workers_per_gather;
+RESET enable_mergejoin;
+RESET enable_nestloop;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+RESET min_parallel_index_scan_size;
+
+DROP TABLE par_results, par_queries, par_t, par_u;
+DROP FUNCTION par_plan_has(text, text);
+RESET DateStyle;
+RESET timezone;
