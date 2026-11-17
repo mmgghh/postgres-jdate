@@ -15,7 +15,7 @@ typedef struct JalaaliDate
 
 typedef struct JalCalResult
 {
-	int			leap;			/* 0..4; 0 means jy is leap */
+	int			leap;			/* 0..3; 0 means jy is leap */
 	int			gy;				/* Gregorian year of Farvardin 1 */
 	int			march;			/* Gregorian day-of-March of Farvardin 1 */
 } JalCalResult;

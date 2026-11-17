@@ -62,15 +62,18 @@ jalcal_core(int jy, int *out_gy, int *out_march, int *out_jump, int *out_n)
 	*out_n = n;
 }
 
+/*
+ * Position of jy in the 4-year leap cycle: 0 means jy is leap, 1 means the
+ * year after a leap year. jmod() never returns a negative value, so the result
+ * is always 0..3; jalaali-js's truncating mod could also yield -1 here (mapped
+ * to 4), a case that cannot arise with jmod().
+ */
 static int
 leap_from_cycle(int jump, int n)
 {
-	int			leap;
-
 	if (jump - n < 6)
 		n = n - jump + jdiv(jump + 4, 33) * 33;
-	leap = jmod(jmod(n + 1, 33) - 1, 4);
-	return leap == -1 ? 4 : leap;
+	return jmod(jmod(n + 1, 33) - 1, 4);
 }
 
 bool

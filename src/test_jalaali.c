@@ -187,7 +187,8 @@ test_boundaries(void)
 }
 
 /*
- * Each Farvardin 1: jalaali_cal agrees with the independent Gregorian code
+ * Each Farvardin 1: leap is in 0..3 and is_leap_year is exactly leap == 0;
+ * jalaali_cal agrees with the independent Gregorian code
  * on which day it is, it falls on March 19..22 of year y+621, and the gap to
  * the next Farvardin 1 is 365 or 366 days (leap iff 366).
  */
@@ -204,6 +205,9 @@ test_nowruz_every_year(void)
 		bool		is_leap = false;
 
 		CHECK(jalaali_cal(jy, &r));
+		CHECK(r.leap >= 0 && r.leap <= 3);
+		CHECK(jalaali_is_leap_year(jy, &is_leap));
+		CHECK(is_leap == (r.leap == 0));
 		CHECK(r.gy == jy + 621);
 		CHECK(r.march >= 19 && r.march <= 22);
 
