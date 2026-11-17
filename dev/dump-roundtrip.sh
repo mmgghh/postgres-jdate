@@ -4,11 +4,14 @@
 # Builds a source database that exercises everything a dump has to carry
 # (boundary days, a negative year, year 0000, +/-infinity, a jdate[] column,
 # a column default and a CHECK, btree and hash indexes, a PARTITION BY HASH
-# table, a view that uses EXTRACT and jdate_trunc), dumps it in three forms
+# table, a view that uses EXTRACT and jdate_trunc; for jtimestamp and
+# jtimestamptz: edge values, infinities, a NULL, jtimestamp(0)/(3) typmod
+# columns, array columns, a DEFAULT and a CHECK), dumps it in three forms
 # (plain, plain with --inserts, custom + pg_restore) into fresh databases and
 # compares what comes back with the source: every value as text and as its
 # binary send form, in order, plus the index, default, CHECK, partition-bound
-# and view definitions. `pg_dump -t <table>` must also exit 0 (the original
+# and view definitions; timestamptz-based values are compared as text under a
+# pinned TimeZone and DateStyle. `pg_dump -t <table>` must also exit 0 (the original
 # symptom). The whole thing runs twice: once with the extension in the default
 # schema and once with `CREATE EXTENSION jdate SCHEMA jdate_s`, where only
 # EXTRACT support (pg_catalog.extract) lives outside that schema.
@@ -136,6 +139,96 @@ SELECT id,
        jdate_trunc('month', d) AS month_start
 FROM jd_rt_days
 WHERE d NOT IN ('infinity', '-infinity');
+
+-- jtimestamp: edge values, a negative year, year 0000, a leap-year last second,
+-- both infinities, epoch and a NULL. The input is Jalali text. The first and
+-- last valid values are -0061-01-01 00:00:00 and 3177-12-29 23:59:59.999999.
+CREATE TABLE jt_rt_ts (
+    id int PRIMARY KEY,
+    ts jtimestamp
+);
+INSERT INTO jt_rt_ts VALUES
+    (1, '-0061-01-01 00:00:00'),             -- first valid value
+    (2, '-0050-07-15 12:00:00'),             -- negative year
+    (3, '-0001-12-29 23:59:59.999999'),
+    (4, '0000-01-01 00:00:00'),              -- year 0000
+    (5, '1348-10-11 00:00:00'),              -- core's epoch
+    (6, '1403-01-01 00:00:00'),              -- Nowruz 1403
+    (7, '1403-12-30 23:59:59.999999'),       -- last second of a leap year
+    (8, '1403-05-15 12:34:56.123456'),
+    (9, '3177-12-29 23:59:59.999999'),       -- last valid value
+    (10, 'infinity'),
+    (11, '-infinity'),
+    (12, NULL);
+
+-- jtimestamptz: the first and last valid instants (the safe range, so they
+-- print in any zone), an instant in a historic-offset era, both infinities
+-- and a NULL. Offsets are explicit in the input so nothing here depends on
+-- the zone of the session that builds the database.
+CREATE TABLE jt_rt_tz (
+    id int PRIMARY KEY,
+    tz jtimestamptz
+);
+INSERT INTO jt_rt_tz VALUES
+    (1, '-0061-01-01 16:00:00+00'),          -- first valid instant
+    (2, '-0050-07-15 12:00:00+03:30'),       -- negative year
+    (3, '0000-01-01 00:00:00+00'),
+    (4, '1348-10-11 00:00:00+00'),           -- core's epoch
+    (5, '1403-01-01 00:00:00+03:30'),        -- Nowruz 1403 in Tehran
+    (6, '1403-12-30 23:59:59.999999-11'),
+    (7, '1403-05-15 12:34:56.123456+05:45'),
+    (8, '3177-12-29 07:59:59.999999+00'),    -- last valid instant
+    (9, 'infinity'),
+    (10, '-infinity'),
+    (11, NULL);
+
+-- Typmod columns: the stored values were rounded to the column's precision
+-- when they were inserted, and a restore must neither change nor re-round them.
+CREATE TABLE jt_rt_typmod (
+    id int PRIMARY KEY,
+    t0 jtimestamp(0),
+    t3 jtimestamp(3),
+    z0 jtimestamptz(0),
+    z3 jtimestamptz(3)
+);
+INSERT INTO jt_rt_typmod VALUES
+    (1, '1403-05-15 12:34:56.789012', '1403-05-15 12:34:56.789012',
+        '1403-05-15 12:34:56.789012+03:30', '1403-05-15 12:34:56.789012+03:30'),
+    (2, '-0061-01-01 00:00:00.5', '-0061-01-01 00:00:00.0005',
+        '-0061-01-01 16:00:00.5+00', '-0061-01-01 16:00:00.0005+00'),
+    (3, '3177-12-29 23:59:59.499999', '3177-12-29 23:59:59.998999',
+        '3177-12-29 07:59:59.499999+00', '3177-12-29 07:59:59.998999+00'),
+    (4, 'infinity', '-infinity', 'infinity', '-infinity'),
+    (5, NULL, NULL, NULL, NULL);
+
+-- Array columns, with an infinity, a NULL element, an empty and a NULL array.
+CREATE TABLE jt_rt_arr (
+    id int PRIMARY KEY,
+    a  jtimestamp[],
+    z  jtimestamptz[]
+);
+INSERT INTO jt_rt_arr VALUES
+    (1, '{"-0061-01-01 00:00:00","0000-01-01 00:00:00","1403-01-01 00:00:00","3177-12-29 23:59:59.999999"}',
+        '{"-0061-01-01 16:00:00+00","0000-01-01 00:00:00+00","1403-01-01 00:00:00+03:30","3177-12-29 07:59:59.999999+00"}'),
+    (2, '{infinity,-infinity,NULL,"1403-05-15 12:34:56.5"}',
+        '{infinity,-infinity,NULL,"1403-05-15 12:34:56.5+03:30"}'),
+    (3, '{}', '{}'),
+    (4, NULL, NULL);
+
+-- A DEFAULT and a CHECK on a jtimestamp and a jtimestamptz column. There are
+-- no jtimestamp operators yet, so the CHECKs compare through the binary casts
+-- to core's timestamp / timestamptz.
+CREATE TABLE jt_rt_def (
+    id int PRIMARY KEY,
+    ts jtimestamp NOT NULL DEFAULT '1403-01-01 00:00:00',
+    tz jtimestamptz NOT NULL DEFAULT '1403-01-01 00:00:00+03:30',
+    CONSTRAINT jt_rt_def_ts_after CHECK (ts::timestamp > '1800-01-01 00:00:00'::timestamp),
+    CONSTRAINT jt_rt_def_tz_after CHECK (tz::timestamptz > '1800-01-01 00:00:00+00'::timestamptz)
+);
+INSERT INTO jt_rt_def (id) VALUES (1);
+INSERT INTO jt_rt_def VALUES
+    (2, '1399-06-31 08:00:00', '1399-06-31 08:00:00-05'),
+    (3, 'infinity', 'infinity');
 SQL
 }
 
@@ -146,6 +239,10 @@ SQL
 snapshot_sql() {
 	cat <<'SQL'
 SET search_path = pg_catalog;
+-- Pinned so the text of a jtimestamptz (a numeric offset in the session zone)
+-- does not depend on the connecting session.
+SET TimeZone = 'Asia/Tehran';
+SET DateStyle = 'ISO, YMD';
 \qecho == extension
 SELECT extname, extversion, extnamespace::regnamespace, extrelocatable
 FROM pg_extension WHERE extname = 'jdate';
@@ -188,9 +285,51 @@ SELECT pg_get_viewdef('public.jd_rt_view'::regclass);
 SELECT id, y, m, dd, month_start::text, encode(:schema.jdate_send(month_start), 'hex') AS send
 FROM public.jd_rt_view ORDER BY id;
 
+\qecho == jtimestamp
+SELECT id, ts::text, encode(:schema.jtimestamp_send(ts), 'hex') AS send
+FROM public.jt_rt_ts ORDER BY id;
+
+\qecho == jtimestamptz
+SELECT id, tz::text, encode(:schema.jtimestamptz_send(tz), 'hex') AS send
+FROM public.jt_rt_tz ORDER BY id;
+
+\qecho == typmod columns
+SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+FROM pg_attribute a
+WHERE a.attrelid = 'public.jt_rt_typmod'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum;
+SELECT id,
+       t0::text, encode(:schema.jtimestamp_send(t0), 'hex') AS t0_send,
+       t3::text, encode(:schema.jtimestamp_send(t3), 'hex') AS t3_send,
+       z0::text, encode(:schema.jtimestamptz_send(z0), 'hex') AS z0_send,
+       z3::text, encode(:schema.jtimestamptz_send(z3), 'hex') AS z3_send
+FROM public.jt_rt_typmod ORDER BY id;
+
+\qecho == jtimestamp and jtimestamptz arrays
+SELECT id, a::text,
+       (SELECT string_agg(coalesce(encode(:schema.jtimestamp_send(x), 'hex'), 'NULL'), ',' ORDER BY o)
+        FROM unnest(a) WITH ORDINALITY u(x, o)) AS sends,
+       z::text,
+       (SELECT string_agg(coalesce(encode(:schema.jtimestamptz_send(x), 'hex'), 'NULL'), ',' ORDER BY o)
+        FROM unnest(z) WITH ORDINALITY u(x, o)) AS z_sends
+FROM public.jt_rt_arr ORDER BY id;
+
+\qecho == jtimestamp and jtimestamptz defaults and checks
+SELECT id, ts::text, encode(:schema.jtimestamp_send(ts), 'hex') AS ts_send,
+       tz::text, encode(:schema.jtimestamptz_send(tz), 'hex') AS tz_send
+FROM public.jt_rt_def ORDER BY id;
+SELECT a.attname, pg_get_expr(ad.adbin, ad.adrelid) AS default_expr
+FROM pg_attrdef ad JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+WHERE ad.adrelid = 'public.jt_rt_def'::regclass ORDER BY a.attname;
+SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint
+WHERE conrelid = 'public.jt_rt_def'::regclass ORDER BY conname;
+
 \qecho == types
-SELECT t.typname, t.typlen, t.typbyval, t.typalign, t.typstorage, t.typcategory, t.typnamespace::regnamespace
-FROM pg_type t WHERE t.typname IN ('jdate', '_jdate') ORDER BY 1;
+SELECT t.typname, t.typlen, t.typbyval, t.typalign, t.typstorage, t.typcategory, t.typnamespace::regnamespace,
+       t.typmodin::regproc, t.typmodout::regproc
+FROM pg_type t
+WHERE t.typname IN ('jdate', '_jdate', 'jtimestamp', '_jtimestamp', 'jtimestamptz', '_jtimestamptz')
+ORDER BY 1;
 SQL
 }
 
@@ -224,7 +363,7 @@ run_pass() {
 
 	# The original symptom: dumping a single jdate table must work.
 	local t
-	for t in jd_rt_days jd_rt_arr jd_rt_part; do
+	for t in jd_rt_days jd_rt_arr jd_rt_part jt_rt_ts jt_rt_tz jt_rt_typmod jt_rt_arr jt_rt_def; do
 		"$PGBIN/pg_dump" -d "$src" -t "$t" -f /dev/null \
 			|| fail "$label: pg_dump -t $t exited non-zero"
 	done
