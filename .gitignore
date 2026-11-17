@@ -18,3 +18,11 @@ log/
 
 # dev/test-cluster.sh's local, root-free PostgreSQL instance
 /.dev/
+
+# Local planning and design notes, kept on disk only
+/docs/plans/
+/docs/design/
+/docs/orchestrate/
+
+# Standalone exhaustive-test binary built from src/test_jalaali.c
+/src/test_jalaali
