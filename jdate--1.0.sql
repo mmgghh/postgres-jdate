@@ -137,16 +137,22 @@ CREATE OPERATOR CLASS jdate_hash_ops
 -- the wrong type) through the jdate->timestamptz assignment cast to
 -- core's own timestamptz aggregates instead of erroring or working
 -- directly on jdate.
+-- COMBINEFUNC is the same function as the transition function (as in core's
+-- date min/max): both merge two partial states by taking the smaller/larger,
+-- and both are STRICT, so a NULL partial state is skipped. This is what lets
+-- the planner use Partial Aggregate / Finalize Aggregate under a Gather.
 CREATE FUNCTION jdate_smaller(jdate, jdate) RETURNS jdate
     AS 'MODULE_PATHNAME', 'jdate_smaller' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 CREATE FUNCTION jdate_larger(jdate, jdate) RETURNS jdate
     AS 'MODULE_PATHNAME', 'jdate_larger' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE AGGREGATE min(jdate) (
-    SFUNC = jdate_smaller, STYPE = jdate, SORTOP = <, PARALLEL = SAFE
+    SFUNC = jdate_smaller, STYPE = jdate, COMBINEFUNC = jdate_smaller,
+    SORTOP = <, PARALLEL = SAFE
 );
 CREATE AGGREGATE max(jdate) (
-    SFUNC = jdate_larger, STYPE = jdate, SORTOP = >, PARALLEL = SAFE
+    SFUNC = jdate_larger, STYPE = jdate, COMBINEFUNC = jdate_larger,
+    SORTOP = >, PARALLEL = SAFE
 );
 
 -- ============================================================
