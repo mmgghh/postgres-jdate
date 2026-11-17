@@ -19,9 +19,11 @@
 #   dev/test-cluster.sh build   # compile jdate.so against the fetched headers
 #   dev/test-cluster.sh tests   # print the test list parsed from the Makefile
 #   dev/test-cluster.sh test [name ...]   # start + build + run pg_regress
-#   dev/test-cluster.sh check [name ...]  # setup + start + test + dumptest (the common case)
+#   dev/test-cluster.sh check [name ...]  # setup + start + test + dumptest + jalaali test (the common case)
 #   dev/test-cluster.sh dumptest # start + build + pg_dump/restore round trip
-#                                # (dev/dump-roundtrip.sh); also the last step of check
+#                                # (dev/dump-roundtrip.sh); also a step of check
+#   dev/test-cluster.sh jalaali  # standalone exhaustive C test of src/jalaali.c
+#                                # (`make test-jalaali`); also the last step of check
 #
 # With no names, `test` and `check` run every entry of the Makefile's
 # REGRESS line. With names, only those run (in the order given). A subset
@@ -173,12 +175,24 @@ cmd_dumptest() {
 	run_dumptest
 }
 
+# Standalone exhaustive test of src/jalaali.c (no server, no PG headers). It
+# builds src/test_jalaali, so it runs under the harness lock like the rest.
+run_jalaali_test() {
+	make -C "$ROOT" --no-print-directory PG_CONFIG="$PGBIN/pg_config" test-jalaali
+}
+
+cmd_jalaali() {
+	take_lock
+	run_jalaali_test
+}
+
 cmd_check() {
 	take_lock
 	cmd_setup
 	cmd_start
 	cmd_test "$@"
 	run_dumptest
+	run_jalaali_test
 }
 
 CMD="${1:-check}"
@@ -192,5 +206,6 @@ case "$CMD" in
 	test) cmd_test "$@" ;;
 	check) cmd_check "$@" ;;
 	dumptest) cmd_dumptest ;;
-	*) echo "usage: $0 {setup|start|stop|build|tests|test [name ...]|check [name ...]|dumptest}" >&2; exit 1 ;;
+	jalaali) cmd_jalaali ;;
+	*) echo "usage: $0 {setup|start|stop|build|tests|test [name ...]|check [name ...]|dumptest|jalaali}" >&2; exit 1 ;;
 esac
