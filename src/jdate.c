@@ -336,6 +336,18 @@ jdate_hash(PG_FUNCTION_ARGS)
 	return DirectFunctionCall1(hashint4, PG_GETARG_DATUM(0));
 }
 
+/*
+ * The seeded, 64-bit hash (support function 2 of the hash opclass), which
+ * PARTITION BY HASH needs. It must hash exactly the values jdate_hash does,
+ * so that the low 32 bits agree at seed 0.
+ */
+PG_FUNCTION_INFO_V1(jdate_hash_extended);
+Datum
+jdate_hash_extended(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(hashint4extended, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
+}
+
 PG_FUNCTION_INFO_V1(jdate_smaller);
 Datum
 jdate_smaller(PG_FUNCTION_ARGS)

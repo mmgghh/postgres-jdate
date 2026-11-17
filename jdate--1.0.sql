@@ -82,6 +82,8 @@ CREATE FUNCTION jdate_cmp(jdate, jdate) RETURNS int4
     AS 'MODULE_PATHNAME', 'jdate_cmp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 CREATE FUNCTION jdate_hash(jdate) RETURNS int4
     AS 'MODULE_PATHNAME', 'jdate_hash' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_hash_extended(jdate, int8) RETURNS int8
+    AS 'MODULE_PATHNAME', 'jdate_hash_extended' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE OPERATOR = (
     LEFTARG = jdate, RIGHTARG = jdate, PROCEDURE = jdate_eq,
@@ -126,7 +128,8 @@ CREATE OPERATOR CLASS jdate_ops
 CREATE OPERATOR CLASS jdate_hash_ops
     DEFAULT FOR TYPE jdate USING hash AS
         OPERATOR 1 =,
-        FUNCTION 1 jdate_hash(jdate);
+        FUNCTION 1 jdate_hash(jdate),
+        FUNCTION 2 jdate_hash_extended(jdate, int8);
 
 -- min()/max() are NOT automatically available for a new base type just
 -- because it has a btree opclass -- each type needs its own aggregate.
