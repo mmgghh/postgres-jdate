@@ -380,6 +380,17 @@ jdate_pli(PG_FUNCTION_ARGS)
 	PG_RETURN_DATEADT(result);
 }
 
+/*
+ * int + jdate, the commutation of jdate + int: swap the arguments and go
+ * through jdate_pli, so the range check and the infinity handling are shared.
+ */
+PG_FUNCTION_INFO_V1(integer_pl_jdate);
+Datum
+integer_pl_jdate(PG_FUNCTION_ARGS)
+{
+	return DirectFunctionCall2(jdate_pli, PG_GETARG_DATUM(1), PG_GETARG_DATUM(0));
+}
+
 PG_FUNCTION_INFO_V1(jdate_mii);
 Datum
 jdate_mii(PG_FUNCTION_ARGS)

@@ -155,6 +155,8 @@ CREATE AGGREGATE max(jdate) (
 
 CREATE FUNCTION jdate_pli(jdate, int4) RETURNS jdate
     AS 'MODULE_PATHNAME', 'jdate_pli' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION integer_pl_jdate(int4, jdate) RETURNS jdate
+    AS 'MODULE_PATHNAME', 'integer_pl_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 CREATE FUNCTION jdate_mii(jdate, int4) RETURNS jdate
     AS 'MODULE_PATHNAME', 'jdate_mii' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 CREATE FUNCTION jdate_mi(jdate, jdate) RETURNS int4
@@ -162,6 +164,12 @@ CREATE FUNCTION jdate_mi(jdate, jdate) RETURNS int4
 
 CREATE OPERATOR + (
     LEFTARG = jdate, RIGHTARG = int4, PROCEDURE = jdate_pli,
+    COMMUTATOR = +
+);
+-- Completes the shell operator that COMMUTATOR = + above creates: without
+-- this, 5 + some_jdate fails with "operator is only a shell".
+CREATE OPERATOR + (
+    LEFTARG = int4, RIGHTARG = jdate, PROCEDURE = integer_pl_jdate,
     COMMUTATOR = +
 );
 CREATE OPERATOR - (

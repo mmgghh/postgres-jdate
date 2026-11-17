@@ -38,3 +38,89 @@ ERROR:  22008
 SELECT '3177-12-29'::jdate + 1;
 ERROR:  22008
 \set VERBOSITY default
+-- int + jdate is the commutation of jdate + int: the same value, the same
+-- range check (22008), infinity stays infinity.
+SELECT 5 + '1403-01-01'::jdate AS int_plus_jdate;
+ int_plus_jdate 
+----------------
+ 1403-01-06
+(1 row)
+
+SELECT '1403-01-01'::jdate + 5 AS jdate_plus_int;
+ jdate_plus_int 
+----------------
+ 1403-01-06
+(1 row)
+
+SELECT (5 + '1403-01-01'::jdate) = ('1403-01-01'::jdate + 5) AS commutes;
+ commutes 
+----------
+ t
+(1 row)
+
+SELECT -10 + '1403-01-11'::jdate AS negative_int_plus_jdate;
+ negative_int_plus_jdate 
+-------------------------
+ 1403-01-01
+(1 row)
+
+SELECT 1 + '1402-12-29'::jdate AS crosses_year_boundary;  -- expect 1403-01-01
+ crosses_year_boundary 
+-----------------------
+ 1403-01-01
+(1 row)
+
+SELECT 1 + '3177-12-28'::jdate AS reach_max, -1 + '-0061-01-02'::jdate AS reach_min;
+ reach_max  |  reach_min  
+------------+-------------
+ 3177-12-29 | -0061-01-01
+(1 row)
+
+SELECT 5 + 'infinity'::jdate AS plus_infinity, 5 + '-infinity'::jdate AS plus_minus_infinity;
+ plus_infinity | plus_minus_infinity 
+---------------+---------------------
+ infinity      | -infinity
+(1 row)
+
+SELECT d, n, n + d AS int_plus_column
+FROM (VALUES ('1403-01-01'::jdate, 40), ('1403-12-29'::jdate, 1)) AS v(d, n);
+     d      | n  | int_plus_column 
+------------+----+-----------------
+ 1403-01-01 | 40 | 1403-02-10
+ 1403-12-29 |  1 | 1403-12-30
+(2 rows)
+
+\set VERBOSITY sqlstate
+SELECT (5 + '3177-12-29'::jdate) IS NOT NULL AS past_max;
+ERROR:  22008
+SELECT (-1 + '-0061-01-01'::jdate) IS NOT NULL AS past_min;
+ERROR:  22008
+SELECT (2147483647 + '3177-12-29'::jdate) IS NOT NULL AS int_max_past_max;
+ERROR:  22008
+SELECT (-2147483647 + '-0061-01-01'::jdate) IS NOT NULL AS int_min_past_min;
+ERROR:  22008
+SELECT 5 + '3177-12-29'::jdate;
+ERROR:  22008
+\set VERBOSITY default
+-- the operator is a real one, not a shell left over from COMMUTATOR = +, and
+-- the two + operators are each other's commutator
+SELECT count(*) AS shell_operators
+FROM pg_operator WHERE oprcode = 0 AND 'jdate'::regtype IN (oprleft, oprright);
+ shell_operators 
+-----------------
+               0
+(1 row)
+
+SELECT l.oprleft::regtype AS left_type, l.oprright::regtype AS right_type,
+       l.oprcode::regproc AS implementation,
+       c.oprleft::regtype AS com_left_type, c.oprright::regtype AS com_right_type,
+       c.oprcom = l.oid AS com_points_back
+FROM pg_operator l JOIN pg_operator c ON c.oid = l.oprcom
+WHERE l.oprname = '+' AND 'jdate'::regtype IN (l.oprleft, l.oprright)
+ORDER BY l.oprleft::regtype::text;
+ left_type | right_type |  implementation  | com_left_type | com_right_type | com_points_back 
+-----------+------------+------------------+---------------+----------------+-----------------
+ integer   | jdate      | integer_pl_jdate | jdate         | integer        | t
+ jdate     | integer    | jdate_pli        | integer       | jdate          | t
+(2 rows)
+
