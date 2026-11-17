@@ -1,6 +1,7 @@
 #include "postgres.h"
 #include "fmgr.h"
 #include "libpq/pqformat.h"
+#include "nodes/miscnodes.h"
 #include "parser/scansup.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
@@ -185,6 +186,14 @@ Datum
 jdate_in(PG_FUNCTION_ARGS)
 {
 	char	   *str = PG_GETARG_CSTRING(0);
+
+	/*
+	 * Soft-error support (PostgreSQL 16+): when the caller passes an
+	 * ErrorSaveContext, ereturn() records the error there and returns, which
+	 * is what pg_input_is_valid, array_in and COPY ... ON_ERROR ignore rely
+	 * on. Otherwise it is an ordinary ereport(ERROR).
+	 */
+	Node	   *escontext = fcinfo->context;
 	int			jy,
 				jm,
 				jd;
@@ -197,27 +206,27 @@ jdate_in(PG_FUNCTION_ARGS)
 		PG_RETURN_DATEADT(DATEVAL_NOBEGIN);
 
 	/*
-	 * Each failure below is a single ereport at the outermost level, with no
-	 * cleanup in between, so it can become an ereturn() unchanged.
+	 * Each failure below is a single ereturn at the outermost level, with no
+	 * cleanup in between, so nothing needs undoing when it returns early.
 	 */
 	switch (jdate_parse(str, &jy, &jm, &jd))
 	{
 		case JDATE_PARSE_OK:
 			break;
 		case JDATE_PARSE_SYNTAX:
-			ereport(ERROR,
+			ereturn(escontext, (Datum) 0,
 					(errcode(ERRCODE_INVALID_DATETIME_FORMAT),
 					 errmsg("invalid input syntax for type jdate: \"%s\"", str)));
 			break;
 		case JDATE_PARSE_OVERFLOW:
-			ereport(ERROR,
+			ereturn(escontext, (Datum) 0,
 					(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
 					 errmsg("date out of range for type jdate: \"%s\"", str)));
 			break;
 	}
 
 	if (!jalaali_is_valid_date(jy, jm, jd))
-		ereport(ERROR,
+		ereturn(escontext, (Datum) 0,
 				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
 				 errmsg("date out of range for type jdate: \"%s\"", str)));
 

@@ -1,0 +1,157 @@
+-- jdate_in reports bad input softly (through the ErrorSaveContext), so
+-- pg_input_is_valid, pg_input_error_info, array input and COPY ... ON_ERROR
+-- ignore can handle it instead of aborting the statement.
+--
+-- Version note: pg_input_is_valid/pg_input_error_info need PostgreSQL 16+,
+-- but COPY ... (ON_ERROR ignore) needs PostgreSQL 17+, so the COPY half of
+-- this file does not run on 16.
+SET DateStyle = 'ISO, YMD';
+SET timezone = 'UTC';
+-- pg_input_is_valid: false for bad input, true for good input
+SELECT pg_input_is_valid('1403-05-15', 'jdate') AS valid;
+ valid 
+-------
+ t
+(1 row)
+
+SELECT pg_input_is_valid('infinity', 'jdate') AS valid_infinity;
+ valid_infinity 
+----------------
+ t
+(1 row)
+
+SELECT pg_input_is_valid('garbage', 'jdate') AS syntax_error;
+ syntax_error 
+--------------
+ f
+(1 row)
+
+SELECT pg_input_is_valid('1403-13-01', 'jdate') AS invalid_month;
+ invalid_month 
+---------------
+ f
+(1 row)
+
+SELECT pg_input_is_valid('1404-12-30', 'jdate') AS non_leap_day_30;
+ non_leap_day_30 
+-----------------
+ f
+(1 row)
+
+SELECT pg_input_is_valid('3178-01-01', 'jdate') AS above_range;
+ above_range 
+-------------
+ f
+(1 row)
+
+SELECT pg_input_is_valid('-0062-12-29', 'jdate') AS below_range;
+ below_range 
+-------------
+ f
+(1 row)
+
+SELECT pg_input_is_valid('99999999999-01-01', 'jdate') AS int32_overflow;
+ int32_overflow 
+----------------
+ f
+(1 row)
+
+-- pg_input_error_info: message and SQLSTATE (22007 syntax, 22008 range)
+SELECT message, sql_error_code
+  FROM pg_input_error_info('garbage', 'jdate');
+                    message                     | sql_error_code 
+------------------------------------------------+----------------
+ invalid input syntax for type jdate: "garbage" | 22007
+(1 row)
+
+SELECT message, sql_error_code
+  FROM pg_input_error_info('1403-13-01', 'jdate');
+                    message                     | sql_error_code 
+------------------------------------------------+----------------
+ date out of range for type jdate: "1403-13-01" | 22008
+(1 row)
+
+SELECT message, sql_error_code
+  FROM pg_input_error_info('3178-01-01', 'jdate');
+                    message                     | sql_error_code 
+------------------------------------------------+----------------
+ date out of range for type jdate: "3178-01-01" | 22008
+(1 row)
+
+SELECT message, sql_error_code
+  FROM pg_input_error_info('99999999999-01-01', 'jdate');
+                        message                        | sql_error_code 
+-------------------------------------------------------+----------------
+ date out of range for type jdate: "99999999999-01-01" | 22008
+(1 row)
+
+-- good input has no error
+SELECT message, sql_error_code
+  FROM pg_input_error_info('1403-05-15', 'jdate');
+ message | sql_error_code 
+---------+----------------
+         | 
+(1 row)
+
+-- array input: one bad element makes the whole literal invalid
+SELECT pg_input_is_valid('{1403-01-01,1403-12-29}', 'jdate[]') AS good_array;
+ good_array 
+------------
+ t
+(1 row)
+
+SELECT pg_input_is_valid('{1403-01-01,x}', 'jdate[]') AS bad_element;
+ bad_element 
+-------------
+ f
+(1 row)
+
+SELECT pg_input_is_valid('{1403-01-01,3178-01-01}', 'jdate[]') AS range_element;
+ range_element 
+---------------
+ f
+(1 row)
+
+SELECT message, sql_error_code
+  FROM pg_input_error_info('{1403-01-01,x}', 'jdate[]');
+                 message                  | sql_error_code 
+------------------------------------------+----------------
+ invalid input syntax for type jdate: "x" | 22007
+(1 row)
+
+-- hard errors still raise, with the same SQLSTATEs
+\set VERBOSITY sqlstate
+SELECT 'garbage'::jdate;
+ERROR:  22007
+SELECT '1403-13-01'::jdate;
+ERROR:  22008
+SELECT '3178-01-01'::jdate;
+ERROR:  22008
+SELECT '99999999999-01-01'::jdate;
+ERROR:  22008
+\set VERBOSITY default
+-- COPY ... ON_ERROR ignore skips bad rows and loads the good ones
+CREATE TABLE softerr_t (id int, d jdate);
+COPY softerr_t FROM STDIN (ON_ERROR ignore);
+NOTICE:  3 rows were skipped due to data type incompatibility
+SELECT id, d FROM softerr_t ORDER BY id;
+ id |     d      
+----+------------
+  1 | 1403-01-01
+  3 | 1403-12-29
+  6 | infinity
+(3 rows)
+
+-- the default, ON_ERROR stop, still aborts on the first bad row
+TRUNCATE softerr_t;
+\set VERBOSITY sqlstate
+COPY softerr_t FROM STDIN (ON_ERROR stop);
+ERROR:  22007
+\set VERBOSITY default
+SELECT count(*) AS rows_after_stop FROM softerr_t;
+ rows_after_stop 
+-----------------
+               0
+(1 row)
+
+DROP TABLE softerr_t;
