@@ -93,3 +93,86 @@ SELECT '3178-01-01'::jdate;    -- one above JALAALI_MAX_YEAR
 ERROR:  date out of range for type jdate: "3178-01-01"
 LINE 1: SELECT '3178-01-01'::jdate;
                ^
+-- integer overflow in a field is an error, never a wrapped value. sscanf's %d
+-- truncated these to 1403, 1, 1, 1403 and -1 respectively.
+\set VERBOSITY sqlstate
+SELECT '4294968699-01-01'::jdate;           -- year 2^32 + 1403
+ERROR:  22008
+SELECT '1403-4294967297-01'::jdate;         -- month 2^32 + 1
+ERROR:  22008
+SELECT '1403-01-4294967297'::jdate;         -- day 2^32 + 1
+ERROR:  22008
+SELECT '-4294965893-01-01'::jdate;          -- year -(2^32 - 1403)
+ERROR:  22008
+SELECT '99999999999999999999-01-01'::jdate; -- far beyond int64 too
+ERROR:  22008
+-- the int32 boundaries: the extremes that fit are out of the Jalali range,
+-- the ones that do not fit overflow; all are 22008
+SELECT '2147483647-01-01'::jdate;           -- INT32_MAX
+ERROR:  22008
+SELECT '2147483648-01-01'::jdate;           -- INT32_MAX + 1
+ERROR:  22008
+SELECT '-2147483648-01-01'::jdate;          -- INT32_MIN
+ERROR:  22008
+SELECT '-2147483649-01-01'::jdate;          -- INT32_MIN - 1
+ERROR:  22008
+-- syntax errors stay 22007
+SELECT ''::jdate;
+ERROR:  22007
+SELECT '-'::jdate;
+ERROR:  22007
+SELECT '1403'::jdate;
+ERROR:  22007
+SELECT '1403-01'::jdate;
+ERROR:  22007
+SELECT '1403-01-'::jdate;
+ERROR:  22007
+SELECT '1403-x-01'::jdate;
+ERROR:  22007
+SELECT '1403-01-01-01'::jdate;
+ERROR:  22007
+\set VERBOSITY default
+SELECT '4294968699-01-01'::jdate;           -- the message for an overflow
+ERROR:  date out of range for type jdate: "4294968699-01-01"
+LINE 1: SELECT '4294968699-01-01'::jdate;
+               ^
+-- redundant leading zeros are not an overflow
+SELECT '0000000000000000000001403-01-01'::jdate;
+   jdate    
+------------
+ 1403-01-01
+(1 row)
+
+SELECT '1403-0000000000000000001-0000000000000000001'::jdate;
+   jdate    
+------------
+ 1403-01-01
+(1 row)
+
+-- the grammar is otherwise unchanged: leading and trailing whitespace, an
+-- optional '+' sign on any field, and whitespace around the dashes are
+-- accepted
+SELECT ' 1403-01-01'::jdate;
+   jdate    
+------------
+ 1403-01-01
+(1 row)
+
+SELECT '+1403-01-01'::jdate;
+   jdate    
+------------
+ 1403-01-01
+(1 row)
+
+SELECT '1403-+01-+01'::jdate;
+   jdate    
+------------
+ 1403-01-01
+(1 row)
+
+SELECT '1403 - 01 - 01'::jdate;
+   jdate    
+------------
+ 1403-01-01
+(1 row)
+

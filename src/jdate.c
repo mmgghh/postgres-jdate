@@ -64,6 +64,109 @@ jdate_to_jalaali(DateADT value)
  * Text I/O
  * ------------------------------------------------------------------- */
 
+/*
+ * Outcome of parsing one "Y-M-D" string, so that jdate_in has a single place
+ * per error kind to report it from.
+ */
+typedef enum JdateParseStatus
+{
+	JDATE_PARSE_OK,
+	JDATE_PARSE_SYNTAX,			/* not of the form Y-M-D */
+	JDATE_PARSE_OVERFLOW		/* a field does not fit in an int32 */
+} JdateParseStatus;
+
+static const char *
+jdate_skip_space(const char *s)
+{
+	while (scanner_isspace(*s))
+		s++;
+	return s;
+}
+
+/*
+ * Parse an optionally signed decimal integer starting exactly at *ptr (no
+ * leading whitespace), advancing *ptr past it. Unlike sscanf's %d, which
+ * silently truncates an out-of-range value to the low 32 bits, a value that
+ * does not fit in an int32 is reported as overflow; redundant leading zeros
+ * are not an overflow. The whole token is consumed either way, so the caller
+ * can still tell a syntax error from an overflow.
+ */
+static JdateParseStatus
+jdate_scan_int(const char **ptr, int *result)
+{
+	const char *s = *ptr;
+	bool		neg = false;
+	int64		limit;
+	int64		acc = 0;
+	bool		overflow = false;
+
+	if (*s == '-')
+	{
+		neg = true;
+		s++;
+	}
+	else if (*s == '+')
+		s++;
+
+	if (*s < '0' || *s > '9')
+		return JDATE_PARSE_SYNTAX;
+
+	/* INT32_MAX, or INT32_MIN's magnitude for a negative value. */
+	limit = neg ? -(int64) PG_INT32_MIN : (int64) PG_INT32_MAX;
+	for (; *s >= '0' && *s <= '9'; s++)
+	{
+		if (!overflow)
+		{
+			acc = acc * 10 + (*s - '0');
+			if (acc > limit)
+				overflow = true;
+		}
+	}
+
+	*ptr = s;
+	if (overflow)
+		return JDATE_PARSE_OVERFLOW;
+	*result = (int) (neg ? -acc : acc);
+	return JDATE_PARSE_OK;
+}
+
+/*
+ * Parse "Y-M-D" into three ints. The grammar is what the sscanf format
+ * " %d - %d - %d " accepted: whitespace may surround the string and each
+ * dash, and each field may carry a sign.
+ */
+static JdateParseStatus
+jdate_parse(const char *str, int *jy, int *jm, int *jd)
+{
+	const char *s = jdate_skip_space(str);
+	JdateParseStatus status;
+	bool		overflow = false;
+	int		   *fields[3] = {jy, jm, jd};
+
+	for (int i = 0; i < 3; i++)
+	{
+		if (i > 0)
+		{
+			s = jdate_skip_space(s);
+			if (*s != '-')
+				return JDATE_PARSE_SYNTAX;
+			s = jdate_skip_space(s + 1);
+		}
+
+		status = jdate_scan_int(&s, fields[i]);
+		if (status == JDATE_PARSE_SYNTAX)
+			return JDATE_PARSE_SYNTAX;
+		if (status == JDATE_PARSE_OVERFLOW)
+			overflow = true;
+	}
+
+	if (*jdate_skip_space(s) != '\0')
+		return JDATE_PARSE_SYNTAX;
+
+	/* A syntax error anywhere outranks an overflow, as with the old sscanf. */
+	return overflow ? JDATE_PARSE_OVERFLOW : JDATE_PARSE_OK;
+}
+
 PG_FUNCTION_INFO_V1(jdate_in);
 Datum
 jdate_in(PG_FUNCTION_ARGS)
@@ -71,8 +174,7 @@ jdate_in(PG_FUNCTION_ARGS)
 	char	   *str = PG_GETARG_CSTRING(0);
 	int			jy,
 				jm,
-				jd,
-				consumed = -1;
+				jd;
 	int			jdn;
 	DateADT		result;
 
@@ -81,11 +183,25 @@ jdate_in(PG_FUNCTION_ARGS)
 	if (pg_strcasecmp(str, "-infinity") == 0)
 		PG_RETURN_DATEADT(DATEVAL_NOBEGIN);
 
-	if (sscanf(str, " %d - %d - %d %n", &jy, &jm, &jd, &consumed) != 3
-		|| consumed < 0 || str[consumed] != '\0')
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_DATETIME_FORMAT),
-				 errmsg("invalid input syntax for type jdate: \"%s\"", str)));
+	/*
+	 * Each failure below is a single ereport at the outermost level, with no
+	 * cleanup in between, so it can become an ereturn() unchanged.
+	 */
+	switch (jdate_parse(str, &jy, &jm, &jd))
+	{
+		case JDATE_PARSE_OK:
+			break;
+		case JDATE_PARSE_SYNTAX:
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_DATETIME_FORMAT),
+					 errmsg("invalid input syntax for type jdate: \"%s\"", str)));
+			break;
+		case JDATE_PARSE_OVERFLOW:
+			ereport(ERROR,
+					(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+					 errmsg("date out of range for type jdate: \"%s\"", str)));
+			break;
+	}
 
 	if (!jalaali_is_valid_date(jy, jm, jd))
 		ereport(ERROR,
