@@ -528,9 +528,16 @@ jdate_get_field(DateADT value, int val)
 				? (jd.jm - 1) * 31 + jd.jd
 				: 186 + (jd.jm - 7) * 30 + jd.jd;
 		case DTK_DECADE:
+			/*
+			 * The decade number, not its first year (core: decade 202 is
+			 * 2020-2029). jy is numbered like core's astronomical year (year
+			 * 0 exists), for which core's result is floor(year / 10); integer
+			 * division truncates, so negative years are rounded down
+			 * explicitly. Decade 0 is years 0..9, decade -1 is years -10..-1.
+			 */
 			return (jd.jy >= 0)
-				? (jd.jy / 10) * 10
-				: -(((-jd.jy) + 9) / 10) * 10;
+				? jd.jy / 10
+				: -(((-jd.jy) + 9) / 10);
 		case DTK_CENTURY:
 			return (jd.jy >= 1)
 				? (jd.jy + 99) / 100
