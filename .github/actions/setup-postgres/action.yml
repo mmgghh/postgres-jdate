@@ -22,6 +22,11 @@ runs:
             sudo pg_dropcluster --stop "${c%/*}" "${c#*/}"
           fi
         done
+        # The runner image does not auto-create a cluster for newly installed
+        # majors, so create $V/main when it is missing.
+        if ! pg_lsclusters --no-header | awk -v v="$V" '$1 == v && $2 == "main" {f=1} END {exit !f}'; then
+          sudo pg_createcluster "$V" main
+        fi
         sudo pg_ctlcluster "$V" main start || true
         pg_lsclusters
         PORT=$(pg_lsclusters --no-header | awk -v v="$V" '$1 == v && $2 == "main" {print $3}')
