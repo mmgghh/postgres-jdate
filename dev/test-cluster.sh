@@ -19,7 +19,9 @@
 #   dev/test-cluster.sh build   # compile jdate.so against the fetched headers
 #   dev/test-cluster.sh tests   # print the test list parsed from the Makefile
 #   dev/test-cluster.sh test [name ...]   # start + build + run pg_regress
-#   dev/test-cluster.sh check [name ...]  # setup + start + test (the common case)
+#   dev/test-cluster.sh check [name ...]  # setup + start + test + dumptest (the common case)
+#   dev/test-cluster.sh dumptest # start + build + pg_dump/restore round trip
+#                                # (dev/dump-roundtrip.sh); also the last step of check
 #
 # With no names, `test` and `check` run every entry of the Makefile's
 # REGRESS line. With names, only those run (in the order given). A subset
@@ -155,11 +157,28 @@ cmd_test() {
 		"${names[@]}"
 }
 
+# pg_dump/restore round trip (dev/dump-roundtrip.sh). It needs the extension
+# built and installed into extdir (cmd_build) and the cluster running; it
+# creates and drops its own jdate_rt_* databases and never touches
+# jdate_dev_test. The connection settings are handed over as libpq variables.
+run_dumptest() {
+	PGBIN="$PGBIN" PGHOST="$SOCKDIR" PGPORT="$PORT" PGUSER="$(whoami)" \
+		"$ROOT/dev/dump-roundtrip.sh"
+}
+
+cmd_dumptest() {
+	take_lock
+	cmd_start
+	cmd_build
+	run_dumptest
+}
+
 cmd_check() {
 	take_lock
 	cmd_setup
 	cmd_start
 	cmd_test "$@"
+	run_dumptest
 }
 
 CMD="${1:-check}"
@@ -172,5 +191,6 @@ case "$CMD" in
 	tests) cmd_tests ;;
 	test) cmd_test "$@" ;;
 	check) cmd_check "$@" ;;
-	*) echo "usage: $0 {setup|start|stop|build|tests|test [name ...]|check [name ...]}" >&2; exit 1 ;;
+	dumptest) cmd_dumptest ;;
+	*) echo "usage: $0 {setup|start|stop|build|tests|test [name ...]|check [name ...]|dumptest}" >&2; exit 1 ;;
 esac
