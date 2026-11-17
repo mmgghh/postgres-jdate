@@ -47,11 +47,24 @@ JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
                 AND d.refclassid = 'pg_extension'::regclass
                 AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'jdate');
 
+-- min(jdate) and max(jdate) have a combine function (so they can run as
+-- Partial/Finalize Aggregate), and it is a PARALLEL SAFE function
+SELECT a.aggfnoid::regprocedure AS aggregate,
+       a.aggcombinefn::regproc AS combinefn,
+       c.proparallel AS combinefn_parallel
+FROM pg_aggregate a
+JOIN pg_proc p ON p.oid = a.aggfnoid
+LEFT JOIN pg_proc c ON c.oid = a.aggcombinefn
+JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+                AND d.deptype = 'e'
+                AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'jdate')
+ORDER BY 1;
+
 -- ---------------------------------------------------------------------
 -- data: 200000 rows over 30000 distinct days, as jdate and as date
 -- ---------------------------------------------------------------------
 CREATE TABLE par_t AS
-    SELECT i AS id, dt, dt::jdate AS d
+    SELECT i AS id, i % 50 AS g, dt, dt::jdate AS d
     FROM (SELECT i, DATE '1970-01-01' + (i % 30000) AS dt
           FROM generate_series(1, 200000) i) s;
 -- a small table with one row per day, to join against
@@ -103,7 +116,10 @@ INSERT INTO par_queries VALUES
      'Gather Merge', true),
     ('9 hash_join',
      $q$SELECT t.id::text || ':' || u.w::text FROM par_t t JOIN par_u u ON t.d = u.d$q$,
-     'Hash Join', false);
+     'Hash Join', false),
+    ('6 min_max_by_col',
+     $q$SELECT g::text || ':' || min(d)::text || ':' || max(d)::text FROM par_t GROUP BY g$q$,
+     'Finalize', false);
 
 -- true when the EXPLAIN output of the query has a line containing node
 CREATE FUNCTION par_plan_has(query text, node text) RETURNS boolean
@@ -127,6 +143,17 @@ SELECT label,
        par_plan_has(query, 'Gather') AS has_gather,
        (node IS NULL OR par_plan_has(query, node)) AS has_expected_node
 FROM par_queries
+ORDER BY label;
+
+-- min/max must use a two-phase aggregate: Partial Aggregate below the
+-- Gather, Finalize Aggregate above it (plain, and grouped by a column).
+-- Query 7 groups by an expression, for which the planner estimates too
+-- many groups to go two-phase; it is only checked for equal results in (c).
+SELECT label,
+       par_plan_has(query, 'Partial') AS has_partial,
+       par_plan_has(query, 'Finalize') AS has_finalize
+FROM par_queries
+WHERE label IN ('6 min_max', '6 min_max_by_col')
 ORDER BY label;
 
 -- ---------------------------------------------------------------------
