@@ -30,16 +30,44 @@ SELECT min(d), max(d), pg_typeof(min(d)) FROM op_dates;
 DROP TABLE op_dates;
 
 -- ---------------------------------------------------------------------
--- btree support functions: jdate_ops carries core's date sort support
--- (2) and btequalimage (4), no skip support; amvalidate accepts it
+-- btree family and support functions: jdate_ops is the default class for
+-- jdate in the family jdatetime_ops that the jtimestamp and jtimestamptz
+-- classes share; it carries core's date sort support (2) and btequalimage (4)
 -- ---------------------------------------------------------------------
+SELECT f.opfname AS family, c.opcname AS class, c.opcintype::regtype AS type, c.opcdefault AS is_default
+FROM pg_opclass c
+JOIN pg_opfamily f ON f.oid = c.opcfamily
+WHERE c.opcname = 'jdate_ops';
+
+-- the jdate entries of the family: five operators on (jdate, jdate)
+SELECT amopstrategy, amopopr::regoperator
+FROM pg_amop
+WHERE amopfamily = (SELECT opcfamily FROM pg_opclass WHERE opcname = 'jdate_ops')
+  AND amoplefttype = 'jdate'::regtype AND amoprighttype = 'jdate'::regtype
+ORDER BY amopstrategy;
+
+-- support functions 1, 2 and 4 of the jdate entry, exactly as before the family
+-- existed (function 6, skip support, is not printed because it exists only on
+-- PostgreSQL 18, see the next query)
 SELECT amprocnum, amproc::regprocedure
 FROM pg_amproc
 WHERE amprocfamily = (SELECT opcfamily FROM pg_opclass WHERE opcname = 'jdate_ops')
+  AND amproclefttype = 'jdate'::regtype AND amprocrighttype = 'jdate'::regtype
+  AND amprocnum <> 6
 ORDER BY amprocnum;
 
-SELECT amvalidate(oid) AS jdate_ops_valid
-FROM pg_opclass WHERE opcname = 'jdate_ops';
+-- skip support (6, date_skipsupport) is present exactly when the server is
+-- PostgreSQL 18 or later
+SELECT (count(*) FILTER (WHERE amprocnum = 6) = 1)
+     = (current_setting('server_version_num')::int >= 180000) AS skipsupport_iff_pg18
+FROM pg_amproc
+WHERE amprocfamily = (SELECT opcfamily FROM pg_opclass WHERE opcname = 'jdate_ops')
+  AND amproclefttype = 'jdate'::regtype AND amprocrighttype = 'jdate'::regtype;
+
+-- amvalidate is not asserted for the family yet: until the cross-type matrix
+-- is added to it, amvalidate reports the missing cross-type operators between
+-- jdate, jtimestamp and jtimestamptz (an INFO message and false). The class
+-- itself is complete: operators 1 to 5 and support functions 1, 2 and 4, above.
 
 -- ordering through the sort support path: duplicates, negative years, both
 -- range edges and infinity (positive and negative), 4,000 rows

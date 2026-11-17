@@ -116,8 +116,14 @@ CREATE OPERATOR >= (
     RESTRICT = scalargesel, JOIN = scalargejoinsel
 );
 
+-- One btree operator family for jdate, jtimestamp and jtimestamptz, as core's
+-- datetime_ops covers date, timestamp and timestamptz. The classes of the two
+-- timestamp types join it further down, in the operators section for those
+-- types, and so does skip support (function 6, PostgreSQL 18 only).
+CREATE OPERATOR FAMILY jdatetime_ops USING btree;
+
 CREATE OPERATOR CLASS jdate_ops
-    DEFAULT FOR TYPE jdate USING btree AS
+    DEFAULT FOR TYPE jdate USING btree FAMILY jdatetime_ops AS
         OPERATOR 1 <,
         OPERATOR 2 <=,
         OPERATOR 3 =,
@@ -126,7 +132,8 @@ CREATE OPERATOR CLASS jdate_ops
         FUNCTION 1 jdate_cmp(jdate, jdate),
         -- jdate is an int32 day count, binary compatible with core's date,
         -- so core's date sort support and btequalimage apply unchanged.
-        -- No skip support (function 6): it exists only on PG 18.
+        -- Skip support (function 6) exists only on PG 18; it is added to the
+        -- family by the DO block at the end of the jtimestamp operators.
         FUNCTION 2 date_sortsupport(internal),
         FUNCTION 4 btequalimage(oid);
 
@@ -519,3 +526,177 @@ CREATE FUNCTION jtimestamptz(jtimestamptz, integer, boolean) RETURNS jtimestampt
     AS 'MODULE_PATHNAME', 'jtimestamptz_scale'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 CREATE CAST (jtimestamptz AS jtimestamptz) WITH FUNCTION jtimestamptz(jtimestamptz, integer, boolean) AS IMPLICIT;
+
+-- ============================================================
+-- Comparison operators, btree and hash opclasses for jtimestamp and jtimestamptz
+-- ============================================================
+--
+-- Same-type comparison only (the cross-type matrix comes later). Every
+-- function delegates to core's timestamp_eq, timestamp_lt, ... and
+-- timestamp_cmp, which work on the shared int64 representation (core's
+-- timestamptz comparison functions are those same functions). All are
+-- IMMUTABLE, also for jtimestamptz: an instant compares the same in every time
+-- zone. The estimators are those of jdate and of core's timestamp operators.
+--
+-- Both btree classes join the family jdatetime_ops that jdate_ops is in, as
+-- core's date, timestamp and timestamptz classes share datetime_ops, so the
+-- cross-type operators added later can sit in the same family. Core's sort
+-- support (function 2) and btequalimage (function 4, btree deduplication)
+-- apply unchanged, as they do for jdate_ops.
+--
+-- The hash opclasses are here and not with the aggregates because `=` is
+-- marked HASHES: without a hash opclass for the type, the planner fails with
+-- "could not find hash function" as soon as it considers a hash join.
+
+-- jtimestamp
+
+CREATE FUNCTION jtimestamp_eq(jtimestamp, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_eq' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_ne(jtimestamp, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_ne' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_lt(jtimestamp, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_lt' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_le(jtimestamp, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_le' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_gt(jtimestamp, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_gt' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_ge(jtimestamp, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_ge' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_cmp(jtimestamp, jtimestamp) RETURNS int4
+    AS 'MODULE_PATHNAME', 'jtimestamp_cmp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_hash(jtimestamp) RETURNS int4
+    AS 'MODULE_PATHNAME', 'jtimestamp_hash' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_hash_extended(jtimestamp, int8) RETURNS int8
+    AS 'MODULE_PATHNAME', 'jtimestamp_hash_extended' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR = (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamp, PROCEDURE = jtimestamp_eq,
+    COMMUTATOR = =, NEGATOR = <>,
+    RESTRICT = eqsel, JOIN = eqjoinsel, HASHES, MERGES
+);
+CREATE OPERATOR <> (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamp, PROCEDURE = jtimestamp_ne,
+    COMMUTATOR = <>, NEGATOR = =,
+    RESTRICT = neqsel, JOIN = neqjoinsel
+);
+CREATE OPERATOR < (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamp, PROCEDURE = jtimestamp_lt,
+    COMMUTATOR = >, NEGATOR = >=,
+    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+CREATE OPERATOR <= (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamp, PROCEDURE = jtimestamp_le,
+    COMMUTATOR = >=, NEGATOR = >,
+    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+CREATE OPERATOR > (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamp, PROCEDURE = jtimestamp_gt,
+    COMMUTATOR = <, NEGATOR = <=,
+    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+CREATE OPERATOR >= (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamp, PROCEDURE = jtimestamp_ge,
+    COMMUTATOR = <=, NEGATOR = <,
+    RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+CREATE OPERATOR CLASS jtimestamp_ops
+    DEFAULT FOR TYPE jtimestamp USING btree FAMILY jdatetime_ops AS
+        OPERATOR 1 <,
+        OPERATOR 2 <=,
+        OPERATOR 3 =,
+        OPERATOR 4 >=,
+        OPERATOR 5 >,
+        FUNCTION 1 jtimestamp_cmp(jtimestamp, jtimestamp),
+        FUNCTION 2 timestamp_sortsupport(internal),
+        FUNCTION 4 btequalimage(oid);
+
+CREATE OPERATOR CLASS jtimestamp_hash_ops
+    DEFAULT FOR TYPE jtimestamp USING hash AS
+        OPERATOR 1 =,
+        FUNCTION 1 jtimestamp_hash(jtimestamp),
+        FUNCTION 2 jtimestamp_hash_extended(jtimestamp, int8);
+
+-- jtimestamptz
+
+CREATE FUNCTION jtimestamptz_eq(jtimestamptz, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_eq' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_ne(jtimestamptz, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_ne' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_lt(jtimestamptz, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_lt' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_le(jtimestamptz, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_le' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_gt(jtimestamptz, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_gt' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_ge(jtimestamptz, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_ge' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_cmp(jtimestamptz, jtimestamptz) RETURNS int4
+    AS 'MODULE_PATHNAME', 'jtimestamptz_cmp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_hash(jtimestamptz) RETURNS int4
+    AS 'MODULE_PATHNAME', 'jtimestamptz_hash' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_hash_extended(jtimestamptz, int8) RETURNS int8
+    AS 'MODULE_PATHNAME', 'jtimestamptz_hash_extended' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR = (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamptz_eq,
+    COMMUTATOR = =, NEGATOR = <>,
+    RESTRICT = eqsel, JOIN = eqjoinsel, HASHES, MERGES
+);
+CREATE OPERATOR <> (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamptz_ne,
+    COMMUTATOR = <>, NEGATOR = =,
+    RESTRICT = neqsel, JOIN = neqjoinsel
+);
+CREATE OPERATOR < (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamptz_lt,
+    COMMUTATOR = >, NEGATOR = >=,
+    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+CREATE OPERATOR <= (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamptz_le,
+    COMMUTATOR = >=, NEGATOR = >,
+    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+CREATE OPERATOR > (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamptz_gt,
+    COMMUTATOR = <, NEGATOR = <=,
+    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+CREATE OPERATOR >= (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamptz_ge,
+    COMMUTATOR = <=, NEGATOR = <,
+    RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+CREATE OPERATOR CLASS jtimestamptz_ops
+    DEFAULT FOR TYPE jtimestamptz USING btree FAMILY jdatetime_ops AS
+        OPERATOR 1 <,
+        OPERATOR 2 <=,
+        OPERATOR 3 =,
+        OPERATOR 4 >=,
+        OPERATOR 5 >,
+        FUNCTION 1 jtimestamptz_cmp(jtimestamptz, jtimestamptz),
+        FUNCTION 2 timestamp_sortsupport(internal),
+        FUNCTION 4 btequalimage(oid);
+
+CREATE OPERATOR CLASS jtimestamptz_hash_ops
+    DEFAULT FOR TYPE jtimestamptz USING hash AS
+        OPERATOR 1 =,
+        FUNCTION 1 jtimestamptz_hash(jtimestamptz),
+        FUNCTION 2 jtimestamptz_hash_extended(jtimestamptz, int8);
+
+-- Skip support (function 6, the btree skip scan of PostgreSQL 18) goes with the
+-- same-type entries of all three types. Support number 6 does not exist before
+-- PostgreSQL 18 and the server would refuse the statement, so it runs through
+-- EXECUTE only when the server is 18 or later; no C code refers to it.
+DO $do$
+BEGIN
+    IF current_setting('server_version_num')::int >= 180000 THEN
+        EXECUTE 'ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
+            FUNCTION 6 (jdate, jdate) date_skipsupport(internal),
+            FUNCTION 6 (jtimestamp, jtimestamp) timestamp_skipsupport(internal),
+            FUNCTION 6 (jtimestamptz, jtimestamptz) timestamp_skipsupport(internal)';
+    END IF;
+END
+$do$;
