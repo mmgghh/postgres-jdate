@@ -488,6 +488,27 @@ timestamptz_jdate(PG_FUNCTION_ARGS)
  * the session zone plays no part here, so the result is the same in every
  * zone and the function is IMMUTABLE (usable in index expressions).
  */
+/*
+ * Validate a finite epoch and floor it to whole seconds. Shared by both
+ * to_jdate variants so they reject exactly the same inputs.
+ */
+static int64
+jdate_epoch_secs(float8 epoch)
+{
+	/*
+	 * Reject anything outside the Jalali range before narrowing the double to
+	 * an integer. The bounds are the epochs of the first instant of the first
+	 * supported day and of the first instant after the last one: exact
+	 * doubles (multiples of 86400, far below 2^53). The test is written
+	 * negated so that NaN fails it too.
+	 */
+	if (!(epoch >= (double) (jalaali_min_jdn() - UNIX_EPOCH_JDATE) * SECS_PER_DAY &&
+		  epoch < (double) (jalaali_max_jdn() - UNIX_EPOCH_JDATE + 1) * SECS_PER_DAY))
+		jdate_range_error();
+
+	return (int64) floor(epoch);
+}
+
 PG_FUNCTION_INFO_V1(jdate_from_epoch);
 Datum
 jdate_from_epoch(PG_FUNCTION_ARGS)
@@ -501,22 +522,11 @@ jdate_from_epoch(PG_FUNCTION_ARGS)
 		PG_RETURN_DATEADT(epoch < 0 ? DATEVAL_NOBEGIN : DATEVAL_NOEND);
 
 	/*
-	 * Reject anything outside the Jalali range before narrowing the double to
-	 * an integer. The bounds are the epochs of the first instant of the first
-	 * supported day and of the first instant after the last one: exact
-	 * doubles (multiples of 86400, far below 2^53). The test is written
-	 * negated so that NaN fails it too.
-	 */
-	if (!(epoch >= (double) (jalaali_min_jdn() - UNIX_EPOCH_JDATE) * SECS_PER_DAY &&
-		  epoch < (double) (jalaali_max_jdn() - UNIX_EPOCH_JDATE + 1) * SECS_PER_DAY))
-		jdate_range_error();
-
-	/*
 	 * Floor to whole seconds, then divide with integer floor division. C's /
 	 * truncates toward zero, which would put the second before the Unix epoch
 	 * (and every earlier negative second) on the wrong day.
 	 */
-	secs = (int64) floor(epoch);
+	secs = jdate_epoch_secs(epoch);
 	days = secs / SECS_PER_DAY;
 	if (secs % SECS_PER_DAY < 0)
 		days--;
@@ -524,6 +534,48 @@ jdate_from_epoch(PG_FUNCTION_ARGS)
 	result = (DateADT) (days - (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE));
 
 	/* Cannot fail after the test above; it keeps the invariant in one place. */
+	jdate_check_range(result);
+	PG_RETURN_DATEADT(result);
+}
+
+/*
+ * to_jdate(double precision, text) -- like to_jdate(epoch), but the day is
+ * the calendar day in the named time zone instead of in UTC.
+ *
+ * The epoch is validated exactly as above, turned into a timestamptz, moved
+ * to local time with core's timestamptz_zone (the function behind
+ * timezone(text, timestamptz) / AT TIME ZONE, so zone names, abbreviations,
+ * POSIX specs and the "time zone ... not recognized" error are all core's),
+ * and cut to a date with core's timestamp_date. The result is range-checked
+ * again, because the zone offset can push an epoch at either edge of the
+ * range onto a day outside it.
+ */
+PG_FUNCTION_INFO_V1(jdate_from_epoch_zone);
+Datum
+jdate_from_epoch_zone(PG_FUNCTION_ARGS)
+{
+	float8		epoch = PG_GETARG_FLOAT8(0);
+	text	   *zone = PG_GETARG_TEXT_PP(1);
+	int64		secs;
+	TimestampTz ts;
+	Timestamp	local;
+	DateADT		result;
+
+	if (isinf(epoch))
+		PG_RETURN_DATEADT(epoch < 0 ? DATEVAL_NOBEGIN : DATEVAL_NOEND);
+
+	secs = jdate_epoch_secs(epoch);
+
+	/* Unix epoch seconds -> PostgreSQL-epoch microseconds; no overflow in range. */
+	ts = (secs - (int64) (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY)
+		* USECS_PER_SEC;
+
+	local = DatumGetTimestamp(DirectFunctionCall2(timestamptz_zone,
+												  PointerGetDatum(zone),
+												  TimestampTzGetDatum(ts)));
+	result = DatumGetDateADT(DirectFunctionCall1(timestamp_date,
+												 TimestampGetDatum(local)));
+
 	jdate_check_range(result);
 	PG_RETURN_DATEADT(result);
 }

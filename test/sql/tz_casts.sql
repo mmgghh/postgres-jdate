@@ -492,6 +492,122 @@ SELECT jdate(timestamptz(jdate '3177-12-28') + interval '24 hours') AS max_edge_
 
 \set VERBOSITY default
 
+-- ---------------------------------------------------------------------
+-- to_jdate(double precision, text zone): the calendar day in a NAMED zone.
+-- The session TimeZone must play no part, so everything below runs with the
+-- session set to a zone that is none of the zones being asked for. Instants
+-- are written as UTC timestamps so a probe means the same on every server.
+-- ---------------------------------------------------------------------
+SET timezone = 'Pacific/Kiritimati';
+
+-- UTC vs Asia/Tehran (+03:30, no DST since 2022) vs America/New_York around
+-- the instant 2024-03-20 00:00 UTC = Nowruz 1403 by the UTC clock. New_York
+-- is on EDT (-04:00) from 2024-03-10, so its local midnight is 04:00 UTC and
+-- Tehran's is 20:30 UTC on the 19th.
+SELECT label,
+       to_jdate(e, 'UTC')              AS utc,
+       to_jdate(e, 'Asia/Tehran')      AS tehran,
+       to_jdate(e, 'America/New_York') AS new_york
+FROM (VALUES ('2024-03-19 20:29:59+00', extract(epoch from timestamptz '2024-03-19 20:29:59+00')::float8),
+             ('2024-03-19 20:30:00+00', extract(epoch from timestamptz '2024-03-19 20:30:00+00')::float8),
+             ('2024-03-19 23:59:59+00', extract(epoch from timestamptz '2024-03-19 23:59:59+00')::float8),
+             ('2024-03-20 00:00:00+00', extract(epoch from timestamptz '2024-03-20 00:00:00+00')::float8),
+             ('2024-03-20 03:59:59+00', extract(epoch from timestamptz '2024-03-20 03:59:59+00')::float8),
+             ('2024-03-20 04:00:00+00', extract(epoch from timestamptz '2024-03-20 04:00:00+00')::float8)
+     ) v(label, e)
+ORDER BY e;
+
+-- the one-argument version is the same as the zone 'UTC'
+SELECT to_jdate(1710892800) = to_jdate(1710892800, 'UTC') AS one_arg_is_utc,
+       to_jdate(1710892799.5) = to_jdate(1710892799.5, 'UTC') AS one_arg_is_utc_frac;
+
+-- DST-change days in America/New_York. 2024-03-10 is the 23-hour day
+-- (02:00 EST jumps to 03:00 EDT) = 1402-12-20; 2024-11-03 is the 25-hour day
+-- (02:00 EDT falls back to 01:00 EST) = 1403-08-13.
+SELECT label, to_jdate(e, 'America/New_York') AS new_york
+FROM (VALUES ('spring: 2024-03-10 04:59:59+00 (23:59:59 on the 9th)', extract(epoch from timestamptz '2024-03-10 04:59:59+00')::float8),
+             ('spring: 2024-03-10 05:00:00+00 (00:00 EST on the 10th)', extract(epoch from timestamptz '2024-03-10 05:00:00+00')::float8),
+             ('spring: 2024-03-10 06:59:59+00 (01:59:59 EST, before the jump)', extract(epoch from timestamptz '2024-03-10 06:59:59+00')::float8),
+             ('spring: 2024-03-10 07:00:00+00 (03:00 EDT, after the jump)', extract(epoch from timestamptz '2024-03-10 07:00:00+00')::float8),
+             ('spring: 2024-03-11 03:59:59+00 (23:59:59 EDT on the 10th)', extract(epoch from timestamptz '2024-03-11 03:59:59+00')::float8),
+             ('spring: 2024-03-11 04:00:00+00 (00:00 EDT on the 11th)', extract(epoch from timestamptz '2024-03-11 04:00:00+00')::float8),
+             ('fall: 2024-11-03 03:59:59+00 (23:59:59 on the 2nd)', extract(epoch from timestamptz '2024-11-03 03:59:59+00')::float8),
+             ('fall: 2024-11-03 04:00:00+00 (00:00 EDT on the 3rd)', extract(epoch from timestamptz '2024-11-03 04:00:00+00')::float8),
+             ('fall: 2024-11-03 05:30:00+00 (01:30 EDT, first pass)', extract(epoch from timestamptz '2024-11-03 05:30:00+00')::float8),
+             ('fall: 2024-11-03 06:30:00+00 (01:30 EST, second pass)', extract(epoch from timestamptz '2024-11-03 06:30:00+00')::float8),
+             ('fall: 2024-11-04 04:59:59+00 (23:59:59 EST on the 3rd)', extract(epoch from timestamptz '2024-11-04 04:59:59+00')::float8),
+             ('fall: 2024-11-04 05:00:00+00 (00:00 EST on the 4th)', extract(epoch from timestamptz '2024-11-04 05:00:00+00')::float8)
+     ) v(label, e)
+ORDER BY e;
+
+-- negative epochs: floor to the second, then the floor day (never toward 0)
+SELECT e, to_jdate(e, 'UTC') AS utc, to_jdate(e, 'Asia/Tehran') AS tehran,
+       to_jdate(e, 'America/New_York') AS new_york
+FROM (VALUES (0::float8), (-0.5), (-1), (-86399), (-86400), (-86401),
+             (-3.5 * 3600), (-31536000), (-31536001)) v(e)
+ORDER BY e;
+
+-- Every Nowruz-range day agrees with core: (to_timestamp(e) AT TIME ZONE z)
+-- cut to a date, for a probe every half hour across 1403 in five zones
+-- (both DST changes of New_York and Auckland fall inside).
+SELECT z, count(*) AS probes,
+       count(*) FILTER (WHERE to_jdate(e, z)
+                        IS DISTINCT FROM ((to_timestamp(e) AT TIME ZONE z)::date)::jdate) AS mismatches
+FROM (VALUES ('UTC'), ('Asia/Tehran'), ('America/New_York'),
+             ('Pacific/Auckland'), ('Pacific/Kiritimati')) zs(z),
+     (SELECT g::float8 FROM generate_series(1710892800, 1742515200, 1800) g) p(e)
+GROUP BY z ORDER BY z;
+
+-- the session zone is irrelevant
+SET timezone = 'UTC';
+SELECT current_setting('timezone') AS session_zone, to_jdate(1710892800, 'Asia/Tehran') AS tehran,
+       to_jdate(1710892800, 'America/New_York') AS new_york;
+SET timezone = 'Asia/Tehran';
+SELECT current_setting('timezone') AS session_zone, to_jdate(1710892800, 'Asia/Tehran') AS tehran,
+       to_jdate(1710892800, 'America/New_York') AS new_york;
+SET timezone = 'Pacific/Pago_Pago';
+SELECT current_setting('timezone') AS session_zone, to_jdate(1710892800, 'Asia/Tehran') AS tehran,
+       to_jdate(1710892800, 'America/New_York') AS new_york;
+SET timezone = 'Pacific/Kiritimati';
+
+-- infinity as in the one-argument version; NULL in, NULL out
+SELECT to_jdate('Infinity'::float8, 'Asia/Tehran') AS inf,
+       to_jdate('-Infinity'::float8, 'America/New_York') AS ninf,
+       to_jdate(1710892800, NULL) IS NULL AS null_zone,
+       to_jdate(NULL::float8, 'UTC') IS NULL AS null_epoch;
+SELECT to_jdate('Infinity'::float8, 'No/Such_Zone') AS inf_skips_zone_check;
+
+-- range edges: the epoch is checked exactly like the one-argument version,
+-- then the LOCAL day is checked too
+\set VERBOSITY sqlstate
+SELECT to_jdate(extract(epoch from jdate '-0061-01-01')::float8, 'UTC') AS min_utc,
+       to_jdate(extract(epoch from jdate '-0061-01-01')::float8, 'Asia/Tehran') AS min_tehran;
+SELECT to_jdate(extract(epoch from jdate '-0061-01-01')::float8, 'America/New_York') IS NOT NULL AS min_new_york_local_day_below;
+SELECT to_jdate(extract(epoch from jdate '-0061-01-01')::float8 - 1, 'Pacific/Kiritimati') IS NOT NULL AS below_min_epoch_even_if_local_day_ok;
+SELECT to_jdate(extract(epoch from jdate '3177-12-29')::float8 + 86399, 'UTC') AS max_utc_last_second,
+       to_jdate(extract(epoch from jdate '3177-12-29')::float8 + 86399, 'Pacific/Pago_Pago') AS max_pago_pago_last_second;
+SELECT to_jdate(extract(epoch from jdate '3177-12-29')::float8 + 86399, 'Pacific/Kiritimati') IS NOT NULL AS max_kiritimati_local_day_above;
+SELECT to_jdate(extract(epoch from jdate '3177-12-29')::float8 + 86400, 'Pacific/Pago_Pago') IS NOT NULL AS above_max_epoch_even_if_local_day_ok;
+SELECT to_jdate('NaN'::float8, 'UTC') IS NOT NULL AS nan;
+SELECT to_jdate(1e300, 'Asia/Tehran') IS NOT NULL AS huge;
+SELECT to_jdate(-1e300, 'Asia/Tehran') IS NOT NULL AS huge_neg;
+SELECT to_jdate(9.3e18, 'UTC') IS NOT NULL AS beyond_int64;
+
+-- unknown zones raise core's error (22023), whatever the epoch
+SELECT to_jdate(1710892800, 'No/Such_Zone') IS NOT NULL AS unknown_zone;
+SELECT to_jdate(1710892800, '') IS NOT NULL AS empty_zone;
+\set VERBOSITY default
+SELECT to_jdate(1710892800, 'No/Such_Zone');
+
+-- volatility copied from core's timezone(text, timestamptz)
+SELECT p.provolatile = c.provolatile AS same_volatility,
+       p.proparallel = c.proparallel AS same_parallel,
+       p.proisstrict
+FROM pg_proc p,
+     (SELECT provolatile, proparallel FROM pg_proc
+      WHERE oid = 'pg_catalog.timezone(text, timestamptz)'::regprocedure) c
+WHERE p.proname = 'to_jdate' AND p.pronargs = 2;
+
 RESET timezone;
 DROP TABLE tz_ins;
 DROP TABLE tz_nowruz;

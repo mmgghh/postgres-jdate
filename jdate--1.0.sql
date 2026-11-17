@@ -238,6 +238,17 @@ CREATE FUNCTION to_jdate(double precision) RETURNS jdate
     AS 'MODULE_PATHNAME', 'jdate_from_epoch'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+-- to_jdate(double precision, text): the same, but the day is the calendar day
+-- in the named time zone (core's timezone(text, timestamptz) conversion, so
+-- zone names, abbreviations and the unknown-zone error are core's own). The
+-- epoch is validated like the one-argument version; the local day is
+-- range-checked too (SQLSTATE 22008). Volatility is copied from core's
+-- timezone(text, timestamptz), which is IMMUTABLE PARALLEL SAFE: the session
+-- TimeZone is not consulted, so it can be indexed.
+CREATE FUNCTION to_jdate(double precision, text) RETURNS jdate
+    AS 'MODULE_PATHNAME', 'jdate_from_epoch_zone'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 -- ============================================================
 -- Field access: jdate_part / extract() / jdate_trunc
 -- ============================================================

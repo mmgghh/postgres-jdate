@@ -114,7 +114,7 @@ SELECT to_jdate('Infinity'::float8) AS inf, to_jdate('-Infinity'::float8) AS nin
 
 -- IMMUTABLE: it can be used in an index expression
 SELECT provolatile, proisstrict, proparallel
-FROM pg_proc WHERE proname = 'to_jdate';
+FROM pg_proc WHERE proname = 'to_jdate' AND pronargs = 1;
 CREATE TABLE to_jdate_idx_t (e float8);
 CREATE INDEX to_jdate_idx_t_idx ON to_jdate_idx_t (to_jdate(e));
 INSERT INTO to_jdate_idx_t VALUES (1710892800), (1710979200), (0);
