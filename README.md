@@ -256,7 +256,7 @@ checked against the sources, the tests, or a running cluster. The essentials:
 | Comparison | `=` `<>` `<` `<=` `>` `>=`; default btree and hash operator classes; `min()`/`max()` |
 | Arithmetic | `jdate + int`, `int + jdate`, `jdate - int`, `jdate - jdate` (days) |
 | Casts | all assignment-level: `date`, `timestamp`, `timestamptz` to and from `jdate` |
-| Fields | `EXTRACT(... FROM jdate)` (numeric), `jdate_part` (bigint, NULL on infinity), `jdate_trunc`; `to_jdate`, `jdate_format`; `dow` is Saturday-first (0 = Saturday .. 6 = Friday, `dow + 1` is 1-based), `isodow` is ISO 8601 (1 = Monday .. 7 = Sunday) |
+| Fields | `EXTRACT(... FROM jdate)` (numeric), `jdate_part` (bigint, NULL on infinity), `jdate_trunc`; `to_jdate(e)` (the UTC day), `to_jdate(e, zone)` (the day in a named zone), `jdate_format`; `dow` is Saturday-first (0 = Saturday .. 6 = Friday, `dow + 1` is 1-based), `isodow` is ISO 8601 (1 = Monday .. 7 = Sunday) |
 | Errors | SQLSTATE `22007`, `22008`, `22023`, `0A000` (see [the table](docs/SPECIFICATION.md#errors-and-sqlstates)) |
 | Extension | version 1.0, **not relocatable**, superuser to install, `extract(text, jdate)` lives in `pg_catalog` |
 | PostgreSQL | 16 or later; the regression suite runs in CI on 16, 17 and 18 (the local harness is 18 only) |

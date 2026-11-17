@@ -32,7 +32,7 @@ covered.
 | Comparison | `=` `<>` `<` `<=` `>` `>=`; default btree and hash operator classes; `min()`/`max()` |
 | Arithmetic | `jdate + int`, `int + jdate`, `jdate - int`, `jdate - jdate` (days) |
 | Casts | all assignment-level: `date`, `timestamp`, `timestamptz` to and from `jdate` |
-| Fields | `EXTRACT(... FROM jdate)`, `jdate_part`, `jdate_trunc`; `to_jdate`, `jdate_format` |
+| Fields | `EXTRACT(... FROM jdate)` (numeric), `jdate_part` (bigint), `jdate_trunc`; `to_jdate(e)`, `to_jdate(e, zone)`, `jdate_format` |
 | Errors | SQLSTATE `22007`, `22008`, `22023`, `0A000` (see [the table](#errors-and-sqlstates)) |
 | Extension | version 1.0, **not relocatable**, superuser to install, `extract(text, jdate)` lives in `pg_catalog` |
 | PostgreSQL | 16 or later; the regression suite runs in CI on 16, 17 and 18 (the local harness is 18 only) |
