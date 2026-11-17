@@ -1,5 +1,7 @@
 # jdate
 
+[![CI](https://github.com/mmgghh/postgres-jdate/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mmgghh/postgres-jdate/actions/workflows/ci.yml)
+
 A native PostgreSQL type for the Jalali (Persian / Solar Hijri) calendar.
 
 Unlike text-based Jalali helpers (this project supersedes
