@@ -148,9 +148,9 @@ year), a year outside `-61` to `3177`, and any field that does not fit in a
 | --- | --- | --- | --- |
 | `22007` `invalid_datetime_format` | text that is not `Y-M-D` or infinity | `jdate_in` | yes |
 | `22008` `datetime_value_out_of_range` | month or day out of range, year outside `-61`..`3177`, a field overflowing 32 bits | `jdate_in` | yes |
-| `22008` | a finite day outside the Jalali range: binary receive, `jdate ± int`, `date`/`timestamp`/`timestamptz` casts, `to_jdate` (including `NaN` and epochs outside the range), `jdate_format` of such a day. Message: `jdate value is outside the supported Jalali range (years -61 to 3177)` | | no |
+| `22008` | a finite day outside the Jalali range: binary receive, `jdate ± int`, `date`/`timestamp`/`timestamptz` casts, `to_jdate` (including `NaN` and epochs outside the range), `jdate_trunc('week')` for a week that starts before the first day, `jdate_format` of such a day. Message: `jdate value is outside the supported Jalali range (years -61 to 3177)` | | no |
 | `22008` | `jdate - jdate` with an infinite operand (`cannot subtract infinite dates`), and a day count that overflows 32 bits (`date out of range`): core's own `date` errors | core | no |
-| `22023` `invalid_parameter_value` | a unit name core does not recognise: `jdate_part`, `EXTRACT`, `jdate_trunc` | | no |
+| `22023` `invalid_parameter_value` | a unit name core does not recognise: `jdate_part`, `EXTRACT`, `jdate_trunc`; a time zone name core does not recognise: `to_jdate(e, zone)`, even for `±Infinity` and `NaN` | | no |
 | `0A000` `feature_not_supported` | a recognised but unsupported unit (`jdate_part`/`EXTRACT`: `week`, `millennium`, `julian`, `isoyear`, `timezone`, `timezone_hour`, `timezone_minute`; `jdate_trunc`: everything but `year`, `quarter`, `month`, `week`, `day`) | | no |
 | `0A000` | `ALTER EXTENSION jdate SET SCHEMA` | the server | no |
 | `42883` `undefined_function` | an operator or function the type does not define, such as `jdate = date`, `jdate + interval`, `jdate + bigint`, `date_part('year', jdate)` | the server | no |
