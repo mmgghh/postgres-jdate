@@ -6,8 +6,10 @@
 # a column default and a CHECK, btree and hash indexes, a PARTITION BY HASH
 # table, a view that uses EXTRACT and jdate_trunc; for jtimestamp and
 # jtimestamptz: edge values, infinities, a NULL, jtimestamp(0)/(3) typmod
-# columns, array columns, a DEFAULT and a CHECK, btree and hash indexes and
-# PARTITION BY HASH tables), dumps it in three forms
+# columns, array columns, a DEFAULT and a CHECK, btree and hash indexes,
+# expression indexes (jday_format, jmonth_format, EXTRACT, jdate_trunc and
+# AT TIME ZONE) and PARTITION BY HASH tables, and views over EXTRACT,
+# jdate_part, jdate_trunc, jday_format and jmonth_format), dumps it in three forms
 # (plain, plain with --inserts, custom + pg_restore) into fresh databases and
 # compares what comes back with the source: every value as text and as its
 # binary send form, in order, plus the index, default, CHECK, partition-bound
@@ -272,6 +274,63 @@ SELECT g, (timestamptz '2024-03-20 00:00:00+00' + g * interval '7 hours 11 minut
 FROM generate_series(0, 59) g;
 INSERT INTO jt_rt_part_tz VALUES (100, '-0061-01-01 16:00:00+00'), (101, '3177-12-29 07:59:59.999999+00'),
                                  (102, 'infinity'), (103, '-infinity'), (104, NULL);
+
+-- Expression indexes. The jtimestamp ones use the IMMUTABLE field functions of
+-- the type; the jtimestamptz ones go through AT TIME ZONE with a fixed zone
+-- (a jtimestamp, indexed by its own btree class) and through the explicit-zone
+-- jdate_trunc, which is IMMUTABLE too. The last one is partial: the truncation of
+-- the first valid instant would fall below the safe range, so the rows the
+-- expression cannot be computed for are left out by the predicate (a partial
+-- index only evaluates its expression on the rows that pass).
+CREATE INDEX jt_rt_ts_day_expr ON jt_rt_ts (jday_format(ts));
+CREATE INDEX jt_rt_ts_month_expr ON jt_rt_ts (jdate_trunc('month', ts));
+CREATE INDEX jt_rt_ts_year_expr ON jt_rt_ts (EXTRACT(year FROM ts));
+CREATE INDEX jt_rt_tz_wall_expr ON jt_rt_tz ((tz AT TIME ZONE 'Asia/Tehran'));
+CREATE INDEX jt_rt_tz_day_expr ON jt_rt_tz (jday_format((tz AT TIME ZONE 'Asia/Tehran')));
+CREATE INDEX jt_rt_tz_month_expr ON jt_rt_tz (jmonth_format((tz AT TIME ZONE 'Asia/Tehran'), '/'));
+CREATE INDEX jt_rt_tz_trunc_expr ON jt_rt_tz (jdate_trunc('day', tz, 'Asia/Tehran'))
+    WHERE tz >= '-0050-01-01 00:00:00+00'::jtimestamptz;
+
+-- Views over EXTRACT (pg_catalog.extract on the new types), jdate_part,
+-- jdate_trunc, jday_format and jmonth_format. The WHERE clauses keep the rows
+-- the functions are defined for: no infinity, and no value within the first week
+-- of the range (the week start would be below the minimum; for jtimestamptz the
+-- local midnight of the first valid instant would be below the safe range).
+-- The jtimestamptz view reads the session zone, which the snapshot pins.
+CREATE VIEW jt_rt_view_ts AS
+SELECT id,
+       EXTRACT(year FROM ts)    AS y,
+       EXTRACT(month FROM ts)   AS m,
+       EXTRACT(day FROM ts)     AS dd,
+       EXTRACT(hour FROM ts)    AS h,
+       EXTRACT(second FROM ts)  AS s,
+       EXTRACT(epoch FROM ts)   AS e,
+       jdate_part('doy', ts)    AS doy,
+       jdate_trunc('month', ts) AS month_start,
+       jdate_trunc('week', ts)  AS week_start,
+       jdate_trunc('hour', ts)  AS hour_start,
+       jday_format(ts)          AS day_key,
+       jmonth_format(ts, '/')   AS month_key
+FROM jt_rt_ts
+WHERE ts BETWEEN '-0061-01-03 00:00:00'::jtimestamp AND '3177-12-29 23:59:59.999999'::jtimestamp;
+
+CREATE VIEW jt_rt_view_tz AS
+SELECT id,
+       EXTRACT(year FROM tz)      AS y,
+       EXTRACT(month FROM tz)     AS m,
+       EXTRACT(day FROM tz)       AS dd,
+       EXTRACT(hour FROM tz)      AS h,
+       EXTRACT(timezone FROM tz)  AS tzoff,
+       EXTRACT(epoch FROM tz)     AS e,
+       jdate_part('doy', tz)      AS doy,
+       jdate_trunc('month', tz)   AS month_start,
+       jdate_trunc('week', tz)    AS week_start,
+       jdate_trunc('day', tz, 'Asia/Tehran') AS tehran_day,
+       jday_format(tz)            AS day_key,
+       jmonth_format(tz, '/')     AS month_key,
+       jday_format(tz AT TIME ZONE 'Asia/Tehran') AS tehran_day_key
+FROM jt_rt_tz
+WHERE tz BETWEEN '-0050-01-01 00:00:00+00'::jtimestamptz AND '3177-01-01 00:00:00+00'::jtimestamptz;
 SQL
 }
 
@@ -397,6 +456,30 @@ FROM (SELECT (SELECT count(*) FROM public.jt_rt_part_ts p WHERE p.ts OPERATOR(:s
 SELECT count(*) AS tz_rows, count(*) FILTER (WHERE found = 1) AS tz_found
 FROM (SELECT (SELECT count(*) FROM public.jt_rt_part_tz p WHERE p.tz OPERATOR(:schema.=) h.tz) AS found
       FROM public.jt_rt_part_tz h WHERE h.tz IS NOT NULL) s;
+
+\qecho == jtimestamp and jtimestamptz views
+SELECT pg_get_viewdef('public.jt_rt_view_ts'::regclass);
+SELECT id, y, m, dd, h, s, e, doy, month_start::text, week_start::text, hour_start::text, day_key, month_key,
+       encode(:schema.jtimestamp_send(month_start), 'hex') AS month_send,
+       encode(:schema.jtimestamp_send(week_start), 'hex') AS week_send
+FROM public.jt_rt_view_ts ORDER BY id;
+SELECT pg_get_viewdef('public.jt_rt_view_tz'::regclass);
+SELECT id, y, m, dd, h, tzoff, e, doy, month_start::text, week_start::text, tehran_day::text, day_key, month_key, tehran_day_key,
+       encode(:schema.jtimestamptz_send(month_start), 'hex') AS month_send,
+       encode(:schema.jtimestamptz_send(tehran_day), 'hex') AS tehran_day_send
+FROM public.jt_rt_view_tz ORDER BY id;
+
+\qecho == expression index lookups
+-- the rows the expression indexes (restored from their definitions) are asked
+-- for; the plan does not matter here, the answers do
+SELECT (SELECT count(*) FROM public.jt_rt_ts WHERE :schema.jday_format(ts) OPERATOR(pg_catalog.=) '1403-01-01') AS ts_day_rows,
+       (SELECT count(*) FROM public.jt_rt_ts WHERE EXTRACT(year FROM ts) OPERATOR(pg_catalog.=) 1403) AS ts_year_rows,
+       (SELECT count(*) FROM public.jt_rt_ts WHERE :schema.jdate_trunc('month', ts) OPERATOR(:schema.=) CAST('1403-05-01 00:00:00' AS :schema.jtimestamp)) AS ts_month_rows,
+       (SELECT count(*) FROM public.jt_rt_tz WHERE :schema.jday_format(tz AT TIME ZONE 'Asia/Tehran') OPERATOR(pg_catalog.=) '1403-01-01') AS tz_day_rows,
+       (SELECT count(*) FROM public.jt_rt_tz WHERE :schema.jmonth_format(tz AT TIME ZONE 'Asia/Tehran', '/') OPERATOR(pg_catalog.=) '1403/05') AS tz_month_rows,
+       (SELECT count(*) FROM public.jt_rt_tz WHERE (tz AT TIME ZONE 'Asia/Tehran') OPERATOR(:schema.>=) CAST('1403-01-01 00:00:00' AS :schema.jtimestamp)) AS tz_wall_rows,
+       (SELECT count(*) FROM public.jt_rt_tz WHERE tz OPERATOR(:schema.>=) CAST('-0050-01-01 00:00:00+00' AS :schema.jtimestamptz)
+                                               AND :schema.jdate_trunc('day', tz, 'Asia/Tehran') OPERATOR(:schema.=) CAST('1403-01-01 00:00:00+03:30' AS :schema.jtimestamptz)) AS tz_trunc_rows;
 
 \qecho == types
 SELECT t.typname, t.typlen, t.typbyval, t.typalign, t.typstorage, t.typcategory, t.typnamespace::regnamespace,
