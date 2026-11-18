@@ -45,17 +45,28 @@ extern void jdate_range_error(void);
 extern void jdate_range_errsave(Node *escontext);
 
 /*
+ * Whether a jdate lies within the Jalali range. Infinity and -infinity are
+ * always valid. The single test behind jdate_check_range; a caller that must
+ * report softly (the canonical function of jdaterange) asks it directly.
+ */
+static inline bool
+jdate_in_range(DateADT value)
+{
+	if (DATE_NOT_FINITE(value))
+		return true;
+
+	return value >= jalaali_min_jdn() - POSTGRES_EPOCH_JDATE &&
+		value <= jalaali_max_jdn() - POSTGRES_EPOCH_JDATE;
+}
+
+/*
  * Raise 22008 unless a finite value lies within the Jalali range. Infinity
  * and -infinity are always valid.
  */
 static inline void
 jdate_check_range(DateADT value)
 {
-	if (DATE_NOT_FINITE(value))
-		return;
-
-	if (value < jalaali_min_jdn() - POSTGRES_EPOCH_JDATE ||
-		value > jalaali_max_jdn() - POSTGRES_EPOCH_JDATE)
+	if (!jdate_in_range(value))
 		jdate_range_error();
 }
 

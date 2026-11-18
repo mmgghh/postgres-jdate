@@ -78,10 +78,56 @@ FROM pg_type WHERE typname IN ('jdate', '_jdate') ORDER BY 1, 2;
  jdate   | jdate_s
 (2 rows)
 
+-- The range and multirange types of jdate, jtimestamp and jtimestamptz and their
+-- arrays are in jdate_s too, and so are their constructors and support functions
+SELECT typname, typtype, typnamespace::regnamespace AS schema
+FROM pg_type WHERE typname ~ '^_?j(date|ts|tstz)(multi)?range$'
+ORDER BY typname COLLATE "C";
+     typname      | typtype | schema  
+------------------+---------+---------
+ _jdatemultirange | b       | jdate_s
+ _jdaterange      | b       | jdate_s
+ _jtsmultirange   | b       | jdate_s
+ _jtsrange        | b       | jdate_s
+ _jtstzmultirange | b       | jdate_s
+ _jtstzrange      | b       | jdate_s
+ jdatemultirange  | m       | jdate_s
+ jdaterange       | r       | jdate_s
+ jtsmultirange    | m       | jdate_s
+ jtsrange         | r       | jdate_s
+ jtstzmultirange  | m       | jdate_s
+ jtstzrange       | r       | jdate_s
+(12 rows)
+
+SELECT count(*) FILTER (WHERE pronamespace = 'jdate_s'::regnamespace) AS range_functions_in_jdate_s,
+       count(*) FILTER (WHERE pronamespace <> 'jdate_s'::regnamespace) AS range_functions_elsewhere
+FROM pg_proc WHERE proname ~ '^j(date|ts|tstz)(multi)?range';
+ range_functions_in_jdate_s | range_functions_elsewhere 
+----------------------------+---------------------------
+                         19 |                         0
+(1 row)
+
 -- jdate_s is not on the search_path, so the type is not visible unqualified...
 \set VERBOSITY sqlstate
 SELECT jdate '1403-05-15';
 ERROR:  42704
+\set VERBOSITY default
+-- ... the range types work when qualified, and so does the canonical edge check
+SELECT '[1403-01-01,1403-01-31]'::jdate_s.jdaterange AS range_in_jdate_s;
+    range_in_jdate_s     
+-------------------------
+ [1403-01-01,1403-02-01)
+(1 row)
+
+SELECT '{[1403-01-01 00:00:00,1403-01-02 00:00:00)}'::jdate_s.jtsmultirange AS multirange_in_jdate_s;
+              multirange_in_jdate_s              
+-------------------------------------------------
+ {["1403-01-01 00:00:00","1403-01-02 00:00:00")}
+(1 row)
+
+\set VERBOSITY sqlstate
+SELECT '[1403-01-01,3177-12-29]'::jdate_s.jdaterange;
+ERROR:  22008
 \set VERBOSITY default
 -- ... but EXTRACT still works, because extract() lives in pg_catalog
 SELECT EXTRACT(year FROM jdate_s.jdate '1403-05-15') AS year;
@@ -200,6 +246,12 @@ WHERE proname = 'extract' AND pronamespace = 'pg_catalog'::regnamespace
 
 SELECT count(*) AS jdate_types FROM pg_type WHERE typname IN ('jdate', '_jdate');
  jdate_types 
+-------------
+           0
+(1 row)
+
+SELECT count(*) AS range_types FROM pg_type WHERE typname ~ '^_?j(date|ts|tstz)(multi)?range$';
+ range_types 
 -------------
            0
 (1 row)

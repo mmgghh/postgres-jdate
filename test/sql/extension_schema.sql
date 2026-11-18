@@ -46,9 +46,25 @@ ORDER BY 1;
 SELECT typname, typnamespace::regnamespace AS schema
 FROM pg_type WHERE typname IN ('jdate', '_jdate') ORDER BY 1, 2;
 
+-- The range and multirange types of jdate, jtimestamp and jtimestamptz and their
+-- arrays are in jdate_s too, and so are their constructors and support functions
+SELECT typname, typtype, typnamespace::regnamespace AS schema
+FROM pg_type WHERE typname ~ '^_?j(date|ts|tstz)(multi)?range$'
+ORDER BY typname COLLATE "C";
+SELECT count(*) FILTER (WHERE pronamespace = 'jdate_s'::regnamespace) AS range_functions_in_jdate_s,
+       count(*) FILTER (WHERE pronamespace <> 'jdate_s'::regnamespace) AS range_functions_elsewhere
+FROM pg_proc WHERE proname ~ '^j(date|ts|tstz)(multi)?range';
+
 -- jdate_s is not on the search_path, so the type is not visible unqualified...
 \set VERBOSITY sqlstate
 SELECT jdate '1403-05-15';
+\set VERBOSITY default
+
+-- ... the range types work when qualified, and so does the canonical edge check
+SELECT '[1403-01-01,1403-01-31]'::jdate_s.jdaterange AS range_in_jdate_s;
+SELECT '{[1403-01-01 00:00:00,1403-01-02 00:00:00)}'::jdate_s.jtsmultirange AS multirange_in_jdate_s;
+\set VERBOSITY sqlstate
+SELECT '[1403-01-01,3177-12-29]'::jdate_s.jdaterange;
 \set VERBOSITY default
 
 -- ... but EXTRACT still works, because extract() lives in pg_catalog
@@ -103,6 +119,7 @@ FROM pg_proc
 WHERE proname = 'extract' AND pronamespace = 'pg_catalog'::regnamespace
   AND pg_get_function_identity_arguments(oid) ~ 'jtimestamp';
 SELECT count(*) AS jdate_types FROM pg_type WHERE typname IN ('jdate', '_jdate');
+SELECT count(*) AS range_types FROM pg_type WHERE typname ~ '^_?j(date|ts|tstz)(multi)?range$';
 SELECT count(*) AS objects_left_in_jdate_s
 FROM pg_depend
 WHERE refclassid = 'pg_namespace'::regclass

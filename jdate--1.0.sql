@@ -1476,3 +1476,73 @@ CREATE FUNCTION jmonth_format(jtimestamp, sep text DEFAULT '-') RETURNS text
     AS 'MODULE_PATHNAME', 'jmonth_format_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 CREATE FUNCTION jmonth_format(jtimestamptz, sep text DEFAULT '-') RETURNS text
     AS 'MODULE_PATHNAME', 'jmonth_format_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+-- ============================================================
+-- Range and multirange types
+-- ============================================================
+--
+-- jdaterange (subtype jdate), jtsrange (jtimestamp) and jtstzrange (jtimestamptz),
+-- and with them the multirange types jdatemultirange, jtsmultirange and
+-- jtstzmultirange (CREATE TYPE ... AS RANGE names a multirange by replacing
+-- "range" with "multirange" in the range name) and the array types of all six.
+-- Core's operators and functions on ranges (@>, &&, +, -, *, lower, upper,
+-- isempty, range_merge, range_agg, the GiST and SP-GiST range operator classes)
+-- are type-agnostic and work on these types as they stand; they order the bounds
+-- with the default btree operator class of the subtype (jdatetime_ops). Range
+-- and multirange literals print their bounds with the output function of the
+-- subtype: '[1403-01-01,1403-02-01)'.
+--
+-- The subtype difference of each range type is core's, for the type it mirrors,
+-- through a C wrapper (a LANGUAGE internal alias of core's daterange_subdiff would
+-- do as well, but would name core's internal functions here); the subtype of a
+-- range type is looked up by the exact signature, so the core function with
+-- date arguments cannot be named directly.
+--
+-- jdaterange is a discrete range, so it has a canonical function: every range is
+-- stored in the form [lower, upper), '[1403-01-01,1403-01-31]' is
+-- '[1403-01-01,1403-02-01)'. jdaterange_canonical lets core's daterange_canonical
+-- do that and then range-checks the bounds, because core would turn the
+-- inclusive upper bound 3177-12-29 (the last supported day) into 3177-12-30, a
+-- day jdate cannot display; the range is refused with 22008 instead. The
+-- continuous ranges (jtsrange, jtstzrange) need no canonical function, as core's
+-- tsrange and tstzrange have none.
+--
+-- There are no casts to or from core's range types (daterange, tsrange,
+-- tstzrange): a range value embeds the OID of its own range type, so a
+-- conversion would need a function, and it is not provided. Convert the bounds,
+-- for example daterange(lower(r)::date, upper(r)::date). A jtstzrange prints its
+-- bounds in the session time zone, as core's tstzrange. A GiST index on any of
+-- the three types serves &&, @>, <@ and the other range operators. The C code is
+-- in src/jdate_range.c.
+
+CREATE TYPE jdaterange;
+
+CREATE FUNCTION jdaterange_canonical(jdaterange) RETURNS jdaterange
+    AS 'MODULE_PATHNAME', 'jdaterange_canonical' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdaterange_subdiff(jdate, jdate) RETURNS float8
+    AS 'MODULE_PATHNAME', 'jdaterange_subdiff' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtsrange_subdiff(jtimestamp, jtimestamp) RETURNS float8
+    AS 'MODULE_PATHNAME', 'jtsrange_subdiff' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtstzrange_subdiff(jtimestamptz, jtimestamptz) RETURNS float8
+    AS 'MODULE_PATHNAME', 'jtstzrange_subdiff' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE jdaterange AS RANGE (
+    SUBTYPE = jdate,
+    SUBTYPE_DIFF = jdaterange_subdiff,
+    CANONICAL = jdaterange_canonical
+);
+CREATE TYPE jtsrange AS RANGE (
+    SUBTYPE = jtimestamp,
+    SUBTYPE_DIFF = jtsrange_subdiff
+);
+CREATE TYPE jtstzrange AS RANGE (
+    SUBTYPE = jtimestamptz,
+    SUBTYPE_DIFF = jtstzrange_subdiff
+);
+
+COMMENT ON TYPE jdaterange IS 'Range of Jalali dates, canonical form [lower, upper)';
+COMMENT ON TYPE jtsrange IS 'Range of Jalali timestamps without time zone';
+COMMENT ON TYPE jtstzrange IS 'Range of Jalali timestamps with time zone';
+COMMENT ON TYPE jdatemultirange IS 'Multirange of Jalali dates';
+COMMENT ON TYPE jtsmultirange IS 'Multirange of Jalali timestamps without time zone';
+COMMENT ON TYPE jtstzmultirange IS 'Multirange of Jalali timestamps with time zone';

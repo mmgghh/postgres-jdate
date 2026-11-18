@@ -9,7 +9,11 @@
 # columns, array columns, a DEFAULT and a CHECK, btree and hash indexes,
 # expression indexes (jday_format, jmonth_format, EXTRACT, jdate_trunc and
 # AT TIME ZONE) and PARTITION BY HASH tables, and views over EXTRACT,
-# jdate_part, jdate_trunc, jday_format and jmonth_format), dumps it in three forms
+# jdate_part, jdate_trunc, jday_format and jmonth_format; and the range types
+# jdaterange, jtsrange, jtstzrange and their multirange types: columns of all six
+# and of their arrays, edge, empty, unbounded and infinite values, a DEFAULT and a
+# CHECK, GiST and btree indexes, an exclusion constraint and a view over range
+# operators), dumps it in three forms
 # (plain, plain with --inserts, custom + pg_restore) into fresh databases and
 # compares what comes back with the source: every value as text and as its
 # binary send form, in order, plus the index, default, CHECK, partition-bound
@@ -331,6 +335,105 @@ SELECT id,
        jday_format(tz AT TIME ZONE 'Asia/Tehran') AS tehran_day_key
 FROM jt_rt_tz
 WHERE tz BETWEEN '-0050-01-01 00:00:00+00'::jtimestamptz AND '3177-01-01 00:00:00+00'::jtimestamptz;
+
+-- Range and multirange types. Edge ranges (the last day only as an exclusive
+-- upper bound: jdaterange refuses an inclusive 3177-12-29, which core would
+-- canonicalize to a day jdate cannot show), inclusive input that comes back
+-- canonical, the empty range, unbounded and infinite bounds, a NULL, the same
+-- values in arrays, and the multirange types.
+CREATE TABLE jr_rt (
+    id  int PRIMARY KEY,
+    d   jdaterange,
+    ts  jtsrange,
+    tz  jtstzrange,
+    dm  jdatemultirange,
+    tsm jtsmultirange,
+    tzm jtstzmultirange
+);
+INSERT INTO jr_rt VALUES
+    (1, '[-0061-01-01,-0061-01-03]', '[-0061-01-01 00:00:00,-0061-01-03 00:00:00)',
+        '[-0061-01-01 16:00:00+00,-0061-01-03 00:00:00+00)',
+        '{[-0061-01-01,-0061-01-03]}', '{[-0061-01-01 00:00:00,-0061-01-03 00:00:00)}',
+        '{[-0061-01-01 16:00:00+00,-0061-01-03 00:00:00+00)}'),
+    (2, '[1403-01-01,1403-01-31]', '[1403-01-01 00:00:00,1403-01-31 12:34:56.789)',
+        '[1403-01-01 00:00:00+03:30,1403-01-31 00:00:00+03:30]',
+        '{[1403-01-01,1403-01-31],[1403-03-01,1403-03-05)}',
+        '{[1403-01-01 00:00:00,1403-01-02 00:00:00),(1403-01-03 00:00:00,1403-01-04 00:00:00]}',
+        '{[1403-01-01 00:00:00+00,1403-01-02 00:00:00+00)}'),
+    (3, '(1403-05-01,1403-05-10)', '(1403-05-01 00:00:00,1403-05-10 00:00:00)',
+        '(1403-05-01 00:00:00+00,1403-05-10 00:00:00+00)',
+        '{(1403-05-01,1403-05-10)}', '{}', '{}'),
+    (4, '[3177-12-28,3177-12-29)', '[3177-12-28 00:00:00,3177-12-29 23:59:59.999999]',
+        '(,3177-12-29 07:59:59.999999+00]',
+        '{[3177-12-28,3177-12-29)}', '{(,3177-12-29 23:59:59.999999]}',
+        '{[3177-12-28 00:00:00+00,3177-12-29 07:59:59.999999+00]}'),
+    (5, 'empty', 'empty', 'empty', '{}', '{}', '{}'),
+    (6, '[1403-01-01,)', '[1403-01-01 00:00:00,)', '(,1403-01-01 00:00:00+00)',
+        '{[1403-01-01,)}', '{(,)}', '{(,)}'),
+    (7, '[-infinity,infinity]', '[-infinity,infinity]', '[-infinity,infinity]',
+        '{[-infinity,infinity]}', '{[-infinity,infinity]}', '{[-infinity,infinity]}'),
+    (8, NULL, NULL, NULL, NULL, NULL, NULL);
+
+-- Arrays of ranges and of multiranges, with an empty range, a NULL element, an
+-- empty and a NULL array.
+CREATE TABLE jr_rt_arr (
+    id  int PRIMARY KEY,
+    da  jdaterange[],
+    tsa jtsrange[],
+    tza jtstzrange[],
+    dma jdatemultirange[]
+);
+INSERT INTO jr_rt_arr VALUES
+    (1, ARRAY['[1403-01-01,1403-01-31]'::jdaterange, 'empty', '[3177-12-28,3177-12-29)'],
+        ARRAY['[1403-01-01 00:00:00,1403-01-02 00:00:00)'::jtsrange, '(,1403-02-01 00:00:00]'],
+        ARRAY['[1403-01-01 00:00:00+03:30,1403-01-02 00:00:00+03:30)'::jtstzrange, '[1403-02-01 00:00:00+00,)'],
+        ARRAY['{[1403-01-01,1403-01-31],[1403-03-01,1403-03-05)}'::jdatemultirange, '{}']),
+    (2, ARRAY[NULL, '[1403-01-01,)']::jdaterange[], ARRAY[NULL, 'empty']::jtsrange[],
+        ARRAY[NULL, '(,)']::jtstzrange[], ARRAY[NULL, '{[1403-01-01,infinity]}']::jdatemultirange[]),
+    (3, '{}', '{}', '{}', '{}'),
+    (4, NULL, NULL, NULL, NULL);
+
+-- A DEFAULT and a CHECK on jdaterange columns (the default is canonicalized when
+-- it is parsed, so the dumped default is the [lower, upper) form), and a generated
+-- column over the range.
+CREATE TABLE jr_rt_def (
+    id  int PRIMARY KEY,
+    r   jdaterange NOT NULL DEFAULT '[1403-01-01,1403-01-31]',
+    len int GENERATED ALWAYS AS (upper(r) - lower(r)) STORED,
+    CONSTRAINT jr_rt_def_inside_1403 CHECK (r <@ '[1403-01-01,1404-01-01)'::jdaterange)
+);
+INSERT INTO jr_rt_def (id) VALUES (1);
+INSERT INTO jr_rt_def VALUES (2, '[1403-12-01,1403-12-29]'), (3, 'empty');
+
+-- GiST indexes on the range and multirange columns, and a btree on a range (the
+-- operator classes are range_ops and multirange_ops of core).
+CREATE INDEX jr_rt_d_gist ON jr_rt USING gist (d);
+CREATE INDEX jr_rt_ts_gist ON jr_rt USING gist (ts);
+CREATE INDEX jr_rt_tz_gist ON jr_rt USING gist (tz);
+CREATE INDEX jr_rt_dm_gist ON jr_rt USING gist (dm);
+CREATE INDEX jr_rt_d_btree ON jr_rt USING btree (d);
+
+-- An exclusion constraint on a jdaterange column: its index is part of what must
+-- survive, and the constraint must still refuse an overlap after the restore.
+CREATE TABLE jr_rt_excl (
+    room   int,
+    during jdaterange,
+    EXCLUDE USING gist (during WITH &&)
+);
+INSERT INTO jr_rt_excl VALUES (1, '[1403-05-01,1403-05-10]'), (2, '[1403-05-11,1403-05-20]'),
+                              (3, '[3177-12-20,3177-12-29)');
+
+-- A view over range operators and accessors.
+CREATE VIEW jr_rt_view AS
+SELECT id,
+       lower(d) AS lo, upper(d) AS up, upper(d) - lower(d) AS days,
+       isempty(d) AS is_empty,
+       d @> '1403-01-15'::jdate AS has_day,
+       d && '[1403-01-01,1403-02-01)'::jdaterange AS overlaps_first_month,
+       d * '[1403-01-01,1403-02-01)'::jdaterange AS first_month_part,
+       range_merge(d, '[1403-06-01,1403-06-02)'::jdaterange) AS merged
+FROM jr_rt
+WHERE d IS NOT NULL AND NOT isempty(d) AND NOT lower_inf(d) AND NOT upper_inf(d) AND lower(d) > '-infinity'::jdate AND upper(d) < 'infinity'::jdate;
 SQL
 }
 
@@ -481,11 +584,86 @@ SELECT (SELECT count(*) FROM public.jt_rt_ts WHERE :schema.jday_format(ts) OPERA
        (SELECT count(*) FROM public.jt_rt_tz WHERE tz OPERATOR(:schema.>=) CAST('-0050-01-01 00:00:00+00' AS :schema.jtimestamptz)
                                                AND :schema.jdate_trunc('day', tz, 'Asia/Tehran') OPERATOR(:schema.=) CAST('1403-01-01 00:00:00+03:30' AS :schema.jtimestamptz)) AS tz_trunc_rows;
 
+\qecho == range and multirange columns
+-- text and binary send form of every value (range_send and multirange_send are
+-- the types' send functions), in order
+SELECT id, d::text, encode(range_send(d), 'hex') AS d_send,
+       ts::text, encode(range_send(ts), 'hex') AS ts_send,
+       tz::text, encode(range_send(tz), 'hex') AS tz_send
+FROM public.jr_rt ORDER BY id;
+SELECT id, dm::text, encode(multirange_send(dm), 'hex') AS dm_send,
+       tsm::text, encode(multirange_send(tsm), 'hex') AS tsm_send,
+       tzm::text, encode(multirange_send(tzm), 'hex') AS tzm_send
+FROM public.jr_rt ORDER BY id;
+
+\qecho == range and multirange arrays
+-- the send form of each element, not of the array: an array's wire form embeds
+-- the element type's OID, which differs between the source and a restored database
+SELECT id, da::text,
+       (SELECT string_agg(coalesce(encode(range_send(x), 'hex'), 'NULL'), ',' ORDER BY o)
+        FROM unnest(da) WITH ORDINALITY u(x, o)) AS da_sends,
+       tsa::text,
+       (SELECT string_agg(coalesce(encode(range_send(x), 'hex'), 'NULL'), ',' ORDER BY o)
+        FROM unnest(tsa) WITH ORDINALITY u(x, o)) AS tsa_sends,
+       tza::text,
+       (SELECT string_agg(coalesce(encode(range_send(x), 'hex'), 'NULL'), ',' ORDER BY o)
+        FROM unnest(tza) WITH ORDINALITY u(x, o)) AS tza_sends,
+       dma::text,
+       (SELECT string_agg(coalesce(encode(multirange_send(x), 'hex'), 'NULL'), ',' ORDER BY o)
+        FROM unnest(dma) WITH ORDINALITY u(x, o)) AS dma_sends
+FROM public.jr_rt_arr ORDER BY id;
+
+\qecho == range defaults and checks
+SELECT id, r::text, encode(range_send(r), 'hex') AS r_send, len
+FROM public.jr_rt_def ORDER BY id;
+SELECT a.attname, pg_get_expr(ad.adbin, ad.adrelid) AS default_expr
+FROM pg_attrdef ad JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+WHERE ad.adrelid = 'public.jr_rt_def'::regclass ORDER BY a.attname;
+SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint
+WHERE conrelid = 'public.jr_rt_def'::regclass ORDER BY conname;
+
+\qecho == range indexes and the exclusion constraint
+SELECT i.indexrelid::regclass::text AS idx, pg_get_indexdef(i.indexrelid),
+       (SELECT string_agg(oc.opcname, ',' ORDER BY u.ord)
+        FROM unnest(i.indclass::oid[]) WITH ORDINALITY u(o, ord)
+        JOIN pg_opclass oc ON oc.oid = u.o) AS opclasses
+FROM pg_index i
+WHERE i.indrelid IN (SELECT oid FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname LIKE 'jr\_rt%')
+ORDER BY 1;
+SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint
+WHERE conrelid = 'public.jr_rt_excl'::regclass ORDER BY conname;
+SELECT room, during::text, encode(range_send(during), 'hex') AS during_send
+FROM public.jr_rt_excl ORDER BY room;
+
+\qecho == range view
+SELECT pg_get_viewdef('public.jr_rt_view'::regclass);
+SELECT id, lo, up, days, is_empty, has_day, overlaps_first_month, first_month_part::text, merged::text,
+       encode(range_send(first_month_part), 'hex') AS part_send, encode(range_send(merged), 'hex') AS merged_send
+FROM public.jr_rt_view ORDER BY id;
+
+\qecho == range queries over the restored indexes
+-- the plan does not matter here, the answers do
+SELECT (SELECT count(*) FROM public.jr_rt WHERE d OPERATOR(pg_catalog.&&) CAST('[1403-01-15,1403-02-15)' AS :schema.jdaterange)) AS d_overlaps,
+       (SELECT count(*) FROM public.jr_rt WHERE ts OPERATOR(pg_catalog.@>) CAST('1403-01-15 00:00:00' AS :schema.jtimestamp)) AS ts_contains,
+       (SELECT count(*) FROM public.jr_rt WHERE tz OPERATOR(pg_catalog.@>) CAST('1403-01-01 00:00:00+00' AS :schema.jtimestamptz)) AS tz_contains,
+       (SELECT count(*) FROM public.jr_rt WHERE dm OPERATOR(pg_catalog.@>) CAST('1403-01-15' AS :schema.jdate)) AS dm_contains,
+       (SELECT count(*) FROM public.jr_rt WHERE d OPERATOR(pg_catalog.=) CAST('[1403-01-01,1403-02-01)' AS :schema.jdaterange)) AS d_equal;
+
 \qecho == types
 SELECT t.typname, t.typlen, t.typbyval, t.typalign, t.typstorage, t.typcategory, t.typnamespace::regnamespace,
        t.typmodin::regproc, t.typmodout::regproc
 FROM pg_type t
 WHERE t.typname IN ('jdate', '_jdate', 'jtimestamp', '_jtimestamp', 'jtimestamptz', '_jtimestamptz')
+ORDER BY 1;
+SELECT t.typname, t.typtype, t.typnamespace::regnamespace,
+       coalesce(r.rngsubtype::regtype::text, '-') AS subtype,
+       coalesce(r.rngcanonical::regproc::text, '-') AS canonical,
+       coalesce(r.rngsubdiff::regproc::text, '-') AS subdiff,
+       coalesce(m.rngtypid::regtype::text, '-') AS multirange_of
+FROM pg_type t
+LEFT JOIN pg_range r ON r.rngtypid = t.oid
+LEFT JOIN pg_range m ON m.rngmultitypid = t.oid
+WHERE t.typname ~ '^_?j(date|ts|tstz)(multi)?range$'
 ORDER BY 1;
 SQL
 }
@@ -520,7 +698,7 @@ run_pass() {
 
 	# The original symptom: dumping a single jdate table must work.
 	local t
-	for t in jd_rt_days jd_rt_arr jd_rt_part jt_rt_ts jt_rt_tz jt_rt_typmod jt_rt_arr jt_rt_def jt_rt_part_ts jt_rt_part_tz; do
+	for t in jd_rt_days jd_rt_arr jd_rt_part jt_rt_ts jt_rt_tz jt_rt_typmod jt_rt_arr jt_rt_def jt_rt_part_ts jt_rt_part_tz jr_rt jr_rt_arr jr_rt_def jr_rt_excl; do
 		"$PGBIN/pg_dump" -d "$src" -t "$t" -f /dev/null \
 			|| fail "$label: pg_dump -t $t exited non-zero"
 	done
