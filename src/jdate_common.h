@@ -219,9 +219,14 @@ typedef struct JdateUnitCache
 	char		bytes[JDATE_UNIT_CACHE_MAX];
 } JdateUnitCache;
 
-/* The DTK_* token of a unit name, or an error; the cached form uses fn_extra. */
-extern int	jdate_decode_field_uncached(text *units);
-extern int	jdate_decode_field(FunctionCallInfo fcinfo, text *units);
+/*
+ * The DTK_* token of a unit name, or an error 22023 whose message names the type
+ * (typname: "jdate", "jtimestamp" or "jtimestamptz"); the cached form uses
+ * fn_extra.
+ */
+extern int	jdate_decode_field_uncached(text *units, const char *typname);
+extern int	jdate_decode_field(FunctionCallInfo fcinfo, text *units,
+							   const char *typname);
 
 extern void jdate_unsupported_unit(void);
 

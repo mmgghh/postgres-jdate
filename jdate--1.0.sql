@@ -1366,3 +1366,37 @@ CREATE FUNCTION pg_catalog.overlaps(jtimestamp, jtimestamp, jtimestamp, jtimesta
     AS 'MODULE_PATHNAME', 'jtimestamp_overlaps' LANGUAGE C IMMUTABLE PARALLEL SAFE;
 CREATE FUNCTION pg_catalog.overlaps(jtimestamptz, jtimestamptz, jtimestamptz, jtimestamptz) RETURNS boolean
     AS 'MODULE_PATHNAME', 'jtimestamptz_overlaps' LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+-- ============================================================
+-- EXTRACT and jdate_part for jtimestamp and jtimestamptz
+-- ============================================================
+--
+-- extract(text, jtimestamp) and extract(text, jtimestamptz) live in pg_catalog
+-- for the reason given with extract(text, jdate) above. Both return numeric, and
+-- so does jdate_part on these types (a double would lose the microseconds of a
+-- late epoch, and the seconds have a fraction); jdate_part(text, jdate) stays
+-- bigint. The date fields (year, month, day, quarter, doy, decade, century, dow
+-- Saturday-first, isodow) are those of the local Jalali date, the time fields
+-- (hour, minute, second with 6 decimals, milliseconds, microseconds) those of the
+-- local time of day, and epoch is exact: a jtimestamp is counted as if it were
+-- UTC, a jtimestamptz is the true instant. timezone, timezone_hour and
+-- timezone_minute exist for jtimestamptz only (core's sign: east is positive).
+-- week, isoyear, millennium and julian are 0A000 for both types, as for jdate,
+-- and so are the timezone fields of a jtimestamp; an unknown unit is 22023.
+-- Infinity: year, decade, century and epoch are +/-Infinity in EXTRACT, every
+-- other field is NULL, and every field is NULL in jdate_part.
+--
+-- jtimestamp is IMMUTABLE; jtimestamptz is STABLE (the fields are those of the
+-- session zone's clock). A call with a bare literal for the value, such as
+-- EXTRACT(year FROM '1403-05-15 10:00'), is ambiguous (42725) now that several
+-- types offer the function. The C code is in src/jtimestamp_fields.c.
+
+CREATE FUNCTION pg_catalog.extract(text, jtimestamp) RETURNS numeric
+    AS 'MODULE_PATHNAME', 'jtimestamp_extract' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.extract(text, jtimestamptz) RETURNS numeric
+    AS 'MODULE_PATHNAME', 'jtimestamptz_extract' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION jdate_part(text, jtimestamp) RETURNS numeric
+    AS 'MODULE_PATHNAME', 'jtimestamp_part' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_part(text, jtimestamptz) RETURNS numeric
+    AS 'MODULE_PATHNAME', 'jtimestamptz_part' LANGUAGE C STABLE STRICT PARALLEL SAFE;
