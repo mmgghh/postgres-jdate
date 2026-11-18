@@ -13,10 +13,12 @@
  * month part of the step is applied with Jalali month lengths and the days and
  * time by core's own arithmetic, months first. They are not passed straight to
  * core's generate_series_timestamp / generate_series_timestamptz because of the
- * month part, because core 18 does not refuse an infinite endpoint (it runs until
- * its own range overflows, or for ever from -infinity), and because the zone
- * variant of core's generate_series_timestamptz is not known on PostgreSQL 16.
- * A single code path also keeps the result independent of the major version.
+ * month part, and because core 18 does not refuse an infinite endpoint (it runs
+ * until its own range overflows, or for ever from -infinity). (Core's zone
+ * variant, generate_series_timestamptz_at_zone, is declared in the 16 headers too,
+ * so its absence was not a reason.) A single code path also keeps the result
+ * independent of the major version, and nothing here needs a version guard except
+ * the infinite step below.
  *
  * jtimestamp steps on its own wall clock. jtimestamptz steps on the wall clock of
  * the session zone, or of the zone given as the fourth argument, the way core

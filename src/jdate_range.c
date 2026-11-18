@@ -27,7 +27,12 @@
  * (jdate_out refuses it). So jdaterange_canonical lets core canonicalize and
  * then range-checks both finite bounds with the shared jdate check, giving the
  * usual 22008 (softly, when the range is being read by an input function that
- * asked for soft errors, such as pg_input_is_valid). Continuous ranges
+ * asked for soft errors, such as pg_input_is_valid). That relies on range_in
+ * and multirange_in handing their ErrorSaveContext to the canonical function
+ * through make_range, which is so on 16, 17 and 18 (make_range takes an
+ * escontext in all three headers); on a server where it were not, the error
+ * would simply be raised (errsave raises when the context is not an
+ * ErrorSaveContext), with the same SQLSTATE. Continuous ranges
  * (jtsrange, jtstzrange) have no canonical function, as core's tsrange has none.
  *
  * The result of every range operator (union, intersection, difference,

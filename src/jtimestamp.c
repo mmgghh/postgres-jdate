@@ -82,6 +82,20 @@ jtimestamp_special_word(const char *str)
  * converted, about a Gregorian string the user never wrote. The SQLSTATE is
  * what matters (22007 syntax, 22008 field out of range, 22009 or 22023 for the
  * zone), so it is kept and the message is rewritten with our type name.
+ *
+ * PostgreSQL versions. This relies on two things that are new in 16:
+ * DirectInputFunctionCallSafe (the soft-error API; the extension needs 16 or
+ * later anyway) and core's timestamp_in / timestamptz_in reporting their parse
+ * errors softly, into the ErrorSaveContext handed to them (the jt_softerr test
+ * ran green on 16 up to its COPY ... ON_ERROR statements, which are 17 and later).
+ * If core's input were not soft (a build or fork whose date/time input still
+ * raises), the error would be raised from inside core and never reach the code
+ * below: the SQLSTATE would still be core's (22007, 22008, 22009, 22023) but the
+ * message would name type timestamp and the Gregorian text the user never wrote,
+ * and pg_input_is_valid, pg_input_error_info and COPY ... ON_ERROR would raise
+ * where they should answer false or skip the row. Valid input is not affected,
+ * and the errors this extension finds itself (the special-word, Jalali date
+ * and range checks) are soft whatever core does.
  */
 static bool
 jtimestamp_call_core(PGFunction core_in, const char *typname, const char *str,
