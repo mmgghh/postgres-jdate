@@ -1,6 +1,7 @@
--- The extension is not relocatable: it registers extract(text, jdate) in
--- pg_catalog (EXTRACT(... FROM x) always resolves to pg_catalog.extract), and
--- that function cannot follow the rest of the extension into another schema,
+-- The extension is not relocatable: it registers extract(text, jdate) and, for
+-- jtimestamp and jtimestamptz, timezone() and overlaps() in pg_catalog (EXTRACT,
+-- AT TIME ZONE and OVERLAPS always resolve to pg_catalog functions), and
+-- those functions cannot follow the rest of the extension into another schema,
 -- so ALTER EXTENSION ... SET SCHEMA cannot work. The schema is chosen at
 -- install time with CREATE EXTENSION jdate SCHEMA s.
 --
@@ -18,7 +19,8 @@ SELECT extname, extnamespace::regnamespace AS schema, extrelocatable
 FROM pg_extension WHERE extname = 'jdate';
 
 -- Every schema-qualified object of the extension lives in jdate_s, except
--- pg_catalog.extract(text, jdate). (Casts have no schema and are skipped.)
+-- pg_catalog.extract(text, jdate) and the six pg_catalog.timezone() and overlaps()
+-- functions of jtimestamp and jtimestamptz. (Casts have no schema and are skipped.)
 SELECT i.type, i.schema, i.identity
 FROM pg_depend d,
      LATERAL pg_identify_object(d.classid, d.objid, d.objsubid) i
@@ -61,13 +63,17 @@ ALTER EXTENSION jdate SET SCHEMA public;
 -- Same statement again, to show the message (and that there is no DETAIL)
 ALTER EXTENSION jdate SET SCHEMA public;
 
--- The extension is intact: same schema, extract() still in pg_catalog
+-- The extension is intact: same schema, extract(), timezone() and overlaps() still in pg_catalog
 SELECT extname, extnamespace::regnamespace AS schema, extrelocatable
 FROM pg_extension WHERE extname = 'jdate';
 SELECT count(*) AS extract_in_pg_catalog
 FROM pg_proc
 WHERE proname = 'extract' AND pronamespace = 'pg_catalog'::regnamespace
   AND pg_get_function_identity_arguments(oid) ~ 'jdate';
+SELECT count(*) AS timezone_and_overlaps_in_pg_catalog
+FROM pg_proc
+WHERE proname IN ('timezone', 'overlaps') AND pronamespace = 'pg_catalog'::regnamespace
+  AND pg_get_function_identity_arguments(oid) ~ 'jtimestamp';
 SELECT count(*) AS extension_functions_outside_jdate_s
 FROM pg_depend d
 WHERE d.classid = 'pg_proc'::regclass
@@ -77,12 +83,16 @@ WHERE d.classid = 'pg_proc'::regclass
   AND (SELECT pronamespace FROM pg_proc WHERE oid = d.objid) <> 'jdate_s'::regnamespace;
 SELECT EXTRACT(year FROM jdate_s.jdate '1403-05-15') AS year_after_failed_alter;
 
--- DROP EXTENSION removes pg_catalog.extract and the type
+-- DROP EXTENSION removes pg_catalog.extract, timezone() and overlaps() of our types, and the types
 DROP EXTENSION jdate;
 SELECT count(*) AS extract_in_pg_catalog
 FROM pg_proc
 WHERE proname = 'extract' AND pronamespace = 'pg_catalog'::regnamespace
   AND pg_get_function_identity_arguments(oid) ~ 'jdate';
+SELECT count(*) AS timezone_and_overlaps_in_pg_catalog
+FROM pg_proc
+WHERE proname IN ('timezone', 'overlaps') AND pronamespace = 'pg_catalog'::regnamespace
+  AND pg_get_function_identity_arguments(oid) ~ 'jtimestamp';
 SELECT count(*) AS jdate_types FROM pg_type WHERE typname IN ('jdate', '_jdate');
 SELECT count(*) AS objects_left_in_jdate_s
 FROM pg_depend

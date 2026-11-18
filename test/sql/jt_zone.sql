@@ -1,0 +1,537 @@
+-- AT TIME ZONE and OVERLAPS for jtimestamp and jtimestamptz.
+--
+-- x AT TIME ZONE z desugars to pg_catalog.timezone(z, x). Core's own functions do
+-- the work (zone lookup, gaps and overlaps), so the checks here are: hand-computed
+-- rows (every Jalali date below was converted by hand; the Gregorian date is in a
+-- comment where it matters), core's AT TIME ZONE on the same numbers (jtimestamp <->
+-- timestamp and jtimestamptz <-> timestamptz casts are binary, so a Jalali value and
+-- its Gregorian twin are the same int64), the range edges of the result, and the
+-- shapes of core's catalog. Errors are shown as SQLSTATE only, never as message text.
+-- The named zones used for hand rows are Asia/Tehran (+03:30, no daylight saving time
+-- in 2024), Asia/Kolkata (+05:30), Asia/Kathmandu (+05:45) and Europe/Paris
+-- (+01 / +02). The range edges use only fixed offsets, never a named zone, so no
+-- historic offset of tzdata is baked in.
+SET DateStyle = 'ISO, YMD';
+SET IntervalStyle = 'postgres';
+SET timezone = 'UTC';
+
+-- The text of the single value of a query, or "ERR <sqlstate>", under a session
+-- time zone (restored afterwards).
+CREATE FUNCTION pg_temp.zval(zone text, q text) RETURNS text
+LANGUAGE plpgsql AS $f$
+DECLARE
+    r text;
+BEGIN
+    PERFORM set_config('TimeZone', zone, false);
+    BEGIN
+        EXECUTE q INTO r;
+        r := coalesce(r, 'NULL');
+    EXCEPTION WHEN OTHERS THEN
+        r := 'ERR ' || SQLSTATE;
+    END;
+    PERFORM set_config('TimeZone', 'UTC', false);
+    RETURN r;
+END
+$f$;
+
+-- ---------------------------------------------------------------------
+-- catalog: timezone() has the four forms core has for timestamp and timestamptz
+-- (zone as text, zone as interval), nothing else; the AT LOCAL form (one
+-- argument) is not provided
+-- ---------------------------------------------------------------------
+SELECT p.oid::regprocedure AS function, p.prorettype::regtype AS returns,
+       p.provolatile AS volatility, p.proisstrict AS strict, p.proparallel AS parallel,
+       (p.provolatile, p.proisstrict, p.proparallel) =
+       (c.provolatile, c.proisstrict, c.proparallel) AS same_flags_as_core,
+       EXISTS (SELECT 1 FROM pg_depend d
+               WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
+                 AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'jdate')) AS in_extension
+FROM (VALUES ('text', 'jtimestamp', 'timestamp'), ('interval', 'jtimestamp', 'timestamp'),
+             ('text', 'jtimestamptz', 'timestamptz'), ('interval', 'jtimestamptz', 'timestamptz')) m(zone, jt, core)
+JOIN pg_proc p ON p.pronamespace = 'pg_catalog'::regnamespace AND p.proname = 'timezone'
+              AND p.proargtypes = format('%s %s', m.zone::regtype::oid, m.jt::regtype::oid)::oidvector
+JOIN pg_proc c ON c.pronamespace = 'pg_catalog'::regnamespace AND c.proname = 'timezone'
+              AND c.proargtypes = format('%s %s', m.zone::regtype::oid, m.core::regtype::oid)::oidvector
+ORDER BY p.oid::regprocedure::text;
+
+SELECT count(*) AS timezone_functions_of_our_types,
+       count(*) FILTER (WHERE pronargs = 1) AS at_local_forms
+FROM pg_proc
+WHERE pronamespace = 'pg_catalog'::regnamespace AND proname = 'timezone'
+  AND proargtypes::oid[] && ARRAY['jtimestamp'::regtype::oid, 'jtimestamptz'::regtype::oid];
+
+-- overlaps(): the four-timestamp form for each type, as core's overlaps_timestamp
+-- (IMMUTABLE, not strict, because core's handles NULL ends itself); no form with an
+-- interval end
+SELECT p.oid::regprocedure AS function, p.prorettype::regtype AS returns,
+       p.provolatile AS volatility, p.proisstrict AS strict, p.proparallel AS parallel,
+       (p.provolatile, p.proisstrict, p.proparallel) =
+       (c.provolatile, c.proisstrict, c.proparallel) AS same_flags_as_core
+FROM (VALUES ('jtimestamp', 'timestamp'), ('jtimestamptz', 'timestamptz')) m(jt, core)
+JOIN pg_proc p ON p.pronamespace = 'pg_catalog'::regnamespace AND p.proname = 'overlaps'
+              AND p.proargtypes = format('%s %s %s %s', m.jt::regtype::oid, m.jt::regtype::oid, m.jt::regtype::oid, m.jt::regtype::oid)::oidvector
+JOIN pg_proc c ON c.pronamespace = 'pg_catalog'::regnamespace AND c.proname = 'overlaps'
+              AND c.proargtypes = format('%s %s %s %s', m.core::regtype::oid, m.core::regtype::oid, m.core::regtype::oid, m.core::regtype::oid)::oidvector
+ORDER BY p.oid::regprocedure::text;
+
+SELECT count(*) AS overlaps_functions_of_our_types,
+       count(*) FILTER (WHERE proargtypes::oid[] @> ARRAY['interval'::regtype::oid]) AS with_an_interval_end
+FROM pg_proc
+WHERE pronamespace = 'pg_catalog'::regnamespace AND proname = 'overlaps'
+  AND proargtypes::oid[] && ARRAY['jtimestamp'::regtype::oid, 'jtimestamptz'::regtype::oid];
+
+-- ---------------------------------------------------------------------
+-- jtimestamp AT TIME ZONE zone: the wall clock read in the zone, a jtimestamptz.
+-- Shown in a UTC session. Hand-computed: 1403-01-01 is Gregorian 2024-03-20,
+-- 1402-12-29 is 2024-03-19, 1403-05-15 is 2024-08-05, 1403-01-12 is 2024-03-31
+-- and 1403-08-06 is 2024-10-27.
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE zone_ts (label text, zone text, wall text, expect text);
+INSERT INTO zone_ts VALUES
+    ('Tehran, Nowruz midnight',  'Asia/Tehran',    '1403-01-01 00:00:00', '1402-12-29 20:30:00+00'),
+    ('Tehran, midday',           'Asia/Tehran',    '1403-05-15 12:00:00', '1403-05-15 08:30:00+00'),
+    ('Kolkata',                  'Asia/Kolkata',   '1403-01-01 00:00:00', '1402-12-29 18:30:00+00'),
+    ('Kathmandu',                'Asia/Kathmandu', '1403-01-01 00:00:00', '1402-12-29 18:15:00+00'),
+    ('Paris, winter (+01)',      'Europe/Paris',   '1403-01-01 00:00:00', '1402-12-29 23:00:00+00'),
+    ('Paris, summer (+02)',      'Europe/Paris',   '1403-05-15 12:00:00', '1403-05-15 10:00:00+00'),
+    -- 2024-03-31 02:30 does not exist in Paris: it moves forward to 03:30+02, as in core
+    ('Paris, gap',               'Europe/Paris',   '1403-01-12 02:30:00', '1403-01-12 01:30:00+00'),
+    -- 2024-10-27 02:30 happens twice: the second time (+01), as in core
+    ('Paris, overlap',           'Europe/Paris',   '1403-08-06 02:30:00', '1403-08-06 01:30:00+00'),
+    ('UTC',                      'UTC',            '1403-01-01 00:00:00', '1403-01-01 00:00:00+00'),
+    ('abbreviation EST (-05)',   'EST',            '1403-01-01 00:00:00', '1403-01-01 05:00:00+00'),
+    ('microseconds kept',        'Asia/Tehran',    '1403-05-15 12:00:00.123456', '1403-05-15 08:30:00.123456+00');
+
+SELECT label, zone, wall, (wall::jtimestamp AT TIME ZONE zone) AS instant, expect,
+       (wall::jtimestamp AT TIME ZONE zone)::text = expect AS ok,
+       (wall::jtimestamp AT TIME ZONE zone)::timestamptz = (wall::jtimestamp::timestamp AT TIME ZONE zone) AS same_as_core
+FROM zone_ts;
+
+-- the zone as an interval: an offset east of UTC, as core reads it
+CREATE TEMP TABLE izone_ts (label text, zone text, wall text, expect text);
+INSERT INTO izone_ts VALUES
+    ('3:30 is Tehran',          '03:30',     '1403-01-01 00:00:00', '1402-12-29 20:30:00+00'),
+    ('5:30 is Kolkata',         '05:30',     '1403-01-01 00:00:00', '1402-12-29 18:30:00+00'),
+    ('5:45 is Kathmandu',       '05:45',     '1403-01-01 00:00:00', '1402-12-29 18:15:00+00'),
+    ('minus 5 hours',           '-05:00',    '1403-01-01 00:00:00', '1403-01-01 05:00:00+00'),
+    ('with seconds',            '03:25:44',  '1403-01-01 00:00:00', '1402-12-29 20:34:16+00'),
+    ('zero',                    '00:00',     '1403-01-01 00:00:00', '1403-01-01 00:00:00+00'),
+    ('40 hours (core accepts it)', '40:00',  '1403-01-01 00:00:00', '1402-12-28 08:00:00+00');
+
+SELECT label, zone, wall, (wall::jtimestamp AT TIME ZONE zone::interval) AS instant, expect,
+       (wall::jtimestamp AT TIME ZONE zone::interval)::text = expect AS ok,
+       (wall::jtimestamp AT TIME ZONE zone::interval)::timestamptz = (wall::jtimestamp::timestamp AT TIME ZONE zone::interval) AS same_as_core
+FROM izone_ts;
+
+-- ---------------------------------------------------------------------
+-- jtimestamptz AT TIME ZONE zone: the wall clock of an instant in the zone, a
+-- jtimestamp. The instants carry their offset, so the session zone is irrelevant.
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE zone_tz (label text, zone text, instant text, expect text);
+INSERT INTO zone_tz VALUES
+    ('Tehran',                  'Asia/Tehran',    '1403-01-01 00:00:00+00', '1403-01-01 03:30:00'),
+    ('Kolkata',                 'Asia/Kolkata',   '1403-01-01 00:00:00+00', '1403-01-01 05:30:00'),
+    ('Kathmandu',               'Asia/Kathmandu', '1403-01-01 00:00:00+00', '1403-01-01 05:45:00'),
+    ('Paris, winter',           'Europe/Paris',   '1403-01-01 00:00:00+00', '1403-01-01 01:00:00'),
+    ('Paris, summer',           'Europe/Paris',   '1403-05-15 12:00:00+00', '1403-05-15 14:00:00'),
+    -- the clocks go forward at 2024-03-31 01:00 UTC (1403-01-12) and back at 2024-10-27 01:00 UTC (1403-08-06)
+    ('Paris, last before the spring change', 'Europe/Paris', '1403-01-12 00:59:59.999999+00', '1403-01-12 01:59:59.999999'),
+    ('Paris, the spring change', 'Europe/Paris',  '1403-01-12 01:00:00+00', '1403-01-12 03:00:00'),
+    ('Paris, last before the autumn change', 'Europe/Paris', '1403-08-06 00:59:59.999999+00', '1403-08-06 02:59:59.999999'),
+    ('Paris, the autumn change', 'Europe/Paris',  '1403-08-06 01:00:00+00', '1403-08-06 02:00:00'),
+    ('instant given in Tehran time', 'Asia/Tehran', '1403-01-01 00:00:00+03:30', '1403-01-01 00:00:00'),
+    ('UTC',                     'UTC',            '1403-01-01 12:34:56.789012+00', '1403-01-01 12:34:56.789012'),
+    ('abbreviation EST (-05)',  'EST',            '1403-01-01 00:00:00+00', '1402-12-29 19:00:00');
+
+SELECT label, zone, instant, (instant::jtimestamptz AT TIME ZONE zone) AS wall, expect,
+       (instant::jtimestamptz AT TIME ZONE zone)::text = expect AS ok,
+       (instant::jtimestamptz AT TIME ZONE zone)::timestamp = (instant::jtimestamptz::timestamptz AT TIME ZONE zone) AS same_as_core
+FROM zone_tz;
+
+SELECT label, zone, instant, (instant::jtimestamptz AT TIME ZONE zone::interval) AS wall, expect,
+       (instant::jtimestamptz AT TIME ZONE zone::interval)::text = expect AS ok,
+       (instant::jtimestamptz AT TIME ZONE zone::interval)::timestamp = (instant::jtimestamptz::timestamptz AT TIME ZONE zone::interval) AS same_as_core
+FROM (VALUES ('3:30 is Tehran',  '03:30', '1403-01-01 00:00:00+00', '1403-01-01 03:30:00'),
+             ('5:45 is Kathmandu', '05:45', '1403-01-01 00:00:00+00', '1403-01-01 05:45:00'),
+             ('minus 5 hours',   '-05:00', '1403-01-01 00:00:00+00', '1402-12-29 19:00:00'),
+             ('with seconds',    '03:25:44', '1403-01-01 00:00:00+00', '1403-01-01 03:25:44'),
+             ('40 hours (core accepts it)', '40:00', '1403-01-01 00:00:00+00', '1403-01-02 16:00:00')) v(label, zone, instant, expect);
+
+-- the types of the results, and the chain the report names: a wall clock to an
+-- instant and back
+SELECT pg_typeof('1403-01-01 00:00:00'::jtimestamp AT TIME ZONE 'Asia/Tehran') AS from_jtimestamp,
+       pg_typeof('1403-01-01 00:00:00+00'::jtimestamptz AT TIME ZONE 'Asia/Tehran') AS from_jtimestamptz,
+       pg_typeof('1403-01-01 00:00:00'::jtimestamp AT TIME ZONE 'Asia/Tehran' AT TIME ZONE 'Asia/Tehran') AS chain,
+       pg_typeof('1403-01-01 00:00:00'::jtimestamp AT TIME ZONE interval '3:30') AS from_jtimestamp_interval,
+       pg_typeof('1403-01-01 00:00:00+00'::jtimestamptz AT TIME ZONE interval '3:30') AS from_jtimestamptz_interval;
+
+-- the answers do not depend on the session zone (the functions are IMMUTABLE):
+-- UTC, Tehran, Paris and the zones at the largest offsets give the same text
+SELECT count(DISTINCT a) AS jtimestamp_to_instant, count(DISTINCT b) AS jtimestamptz_to_wall, count(*) AS zones
+FROM (SELECT pg_temp.zval(z, $$SELECT ('1403-05-15 12:00:00'::jtimestamp AT TIME ZONE 'Europe/Paris')::timestamptz AT TIME ZONE 'UTC'$$) AS a,
+             pg_temp.zval(z, $$SELECT ('1403-05-15 12:00:00+00'::jtimestamptz AT TIME ZONE 'Europe/Paris')::text$$) AS b
+      FROM unnest(ARRAY['UTC', 'Asia/Tehran', 'Europe/Paris', '<+15:59>-15:59', '<-15:59>+15:59']) z) q;
+
+-- a wall time that does not exist moves forward, an ambiguous one takes its second
+-- occurrence (core's rule), so the round trip wall -> instant -> wall is not the
+-- identity in a gap, and instant -> wall -> instant is not the identity in an overlap
+SELECT ('1403-01-12 02:30:00'::jtimestamp AT TIME ZONE 'Europe/Paris' AT TIME ZONE 'Europe/Paris') AS gap_wall_comes_back_as,
+       ('1403-08-06 02:30:00'::jtimestamp AT TIME ZONE 'Europe/Paris' AT TIME ZONE 'Europe/Paris') AS overlap_wall_comes_back_as,
+       ('1403-08-06 00:30:00+00'::jtimestamptz AT TIME ZONE 'Europe/Paris' AT TIME ZONE 'Europe/Paris') AS first_occurrence_instant_comes_back_as,
+       ('1403-08-06 01:30:00+00'::jtimestamptz AT TIME ZONE 'Europe/Paris' AT TIME ZONE 'Europe/Paris') AS second_occurrence_instant_comes_back_as;
+
+-- ---------------------------------------------------------------------
+-- the range edges of the result. jtimestamp -> jtimestamptz: the instant must be
+-- in the safe range, first valid -0061-01-01 16:00:00+00, last
+-- 3177-12-29 07:59:59.999999+00. jtimestamptz -> jtimestamp: the wall clock must be
+-- in the Jalali range, -0061-01-01 00:00:00 to 3177-12-29 23:59:59.999999.
+-- Fixed offsets only (an interval, or a POSIX name with the sign inverted).
+-- ---------------------------------------------------------------------
+SELECT label, pg_temp.zval('UTC', q) AS result, expect
+FROM (VALUES
+    ('UTC, first wall clock',            $$SELECT ('-0061-01-01 00:00:00'::jtimestamp AT TIME ZONE 'UTC')::text$$, 'ERR 22008'),
+    ('UTC, 1 us before the first valid', $$SELECT ('-0061-01-01 15:59:59.999999'::jtimestamp AT TIME ZONE 'UTC')::text$$, 'ERR 22008'),
+    ('UTC, first valid',                 $$SELECT ('-0061-01-01 16:00:00'::jtimestamp AT TIME ZONE 'UTC')::text$$, '-0061-01-01 16:00:00+00'),
+    ('UTC, last valid',                  $$SELECT ('3177-12-29 07:59:59.999999'::jtimestamp AT TIME ZONE 'UTC')::text$$, '3177-12-29 07:59:59.999999+00'),
+    ('UTC, 1 us after the last valid',   $$SELECT ('3177-12-29 08:00:00'::jtimestamp AT TIME ZONE 'UTC')::text$$, 'ERR 22008'),
+    ('UTC, last wall clock',             $$SELECT ('3177-12-29 23:59:59.999999'::jtimestamp AT TIME ZONE 'UTC')::text$$, 'ERR 22008'),
+    -- +15:59: instant = wall - 15:59
+    ('+15:59, first valid',              $$SELECT ('-0061-01-02 07:59:00'::jtimestamp AT TIME ZONE interval '15:59')::text$$, '-0061-01-01 16:00:00+00'),
+    ('+15:59, 1 us before',              $$SELECT ('-0061-01-02 07:58:59.999999'::jtimestamp AT TIME ZONE interval '15:59')::text$$, 'ERR 22008'),
+    ('+15:59, last valid',               $$SELECT ('3177-12-29 23:58:59.999999'::jtimestamp AT TIME ZONE interval '15:59')::text$$, '3177-12-29 07:59:59.999999+00'),
+    ('+15:59, 1 us after',               $$SELECT ('3177-12-29 23:59:00'::jtimestamp AT TIME ZONE interval '15:59')::text$$, 'ERR 22008'),
+    -- -15:59: instant = wall + 15:59
+    ('-15:59, first valid',              $$SELECT ('-0061-01-01 00:01:00'::jtimestamp AT TIME ZONE interval '-15:59')::text$$, '-0061-01-01 16:00:00+00'),
+    ('-15:59, 1 us before',              $$SELECT ('-0061-01-01 00:00:59.999999'::jtimestamp AT TIME ZONE interval '-15:59')::text$$, 'ERR 22008'),
+    ('-15:59, last valid',               $$SELECT ('3177-12-28 16:00:59.999999'::jtimestamp AT TIME ZONE interval '-15:59')::text$$, '3177-12-29 07:59:59.999999+00'),
+    ('-15:59, 1 us after',               $$SELECT ('3177-12-28 16:01:00'::jtimestamp AT TIME ZONE interval '-15:59')::text$$, 'ERR 22008'),
+    -- the POSIX names of the same two zones (the sign is inverted) give the same answers
+    ('POSIX +15:59, first valid',        $$SELECT ('-0061-01-02 07:59:00'::jtimestamp AT TIME ZONE '<+15:59>-15:59')::text$$, '-0061-01-01 16:00:00+00'),
+    ('POSIX +15:59, 1 us before',        $$SELECT ('-0061-01-02 07:58:59.999999'::jtimestamp AT TIME ZONE '<+15:59>-15:59')::text$$, 'ERR 22008'),
+    ('POSIX -15:59, last valid',         $$SELECT ('3177-12-28 16:00:59.999999'::jtimestamp AT TIME ZONE '<-15:59>+15:59')::text$$, '3177-12-29 07:59:59.999999+00'),
+    ('POSIX -15:59, 1 us after',         $$SELECT ('3177-12-28 16:01:00'::jtimestamp AT TIME ZONE '<-15:59>+15:59')::text$$, 'ERR 22008')
+) v(label, q, expect)
+ORDER BY label;
+
+-- an instant of the safe range has a wall clock in the Jalali range in every zone
+-- core allows by name (offsets up to 15:59:59): this direction cannot fail there
+SELECT z.name,
+       ('-0061-01-01 16:00:00+00'::jtimestamptz AT TIME ZONE z.zone) AS first_valid_instant,
+       ('3177-12-29 07:59:59.999999+00'::jtimestamptz AT TIME ZONE z.zone) AS last_valid_instant
+FROM (VALUES ('+15:59', '<+15:59>-15:59'), ('-15:59', '<-15:59>+15:59'), ('UTC', 'UTC')) z(name, zone)
+ORDER BY z.name;
+
+-- core accepts any interval offset, so with one beyond 16 hours the result of this
+-- direction can leave the Jalali range too
+SELECT label, pg_temp.zval('UTC', q) AS result, expect
+FROM (VALUES
+    ('first valid instant, 20 hours west',  $$SELECT ('-0061-01-01 16:00:00+00'::jtimestamptz AT TIME ZONE interval '-20:00')::text$$, 'ERR 22008'),
+    ('first valid instant, 20 hours east',  $$SELECT ('-0061-01-01 16:00:00+00'::jtimestamptz AT TIME ZONE interval '20:00')::text$$, '-0061-01-02 12:00:00'),
+    ('last valid instant, 20 hours east',   $$SELECT ('3177-12-29 07:59:59.999999+00'::jtimestamptz AT TIME ZONE interval '20:00')::text$$, 'ERR 22008'),
+    ('last valid instant, 20 hours west',   $$SELECT ('3177-12-29 07:59:59.999999+00'::jtimestamptz AT TIME ZONE interval '-20:00')::text$$, '3177-12-28 11:59:59.999999'),
+    ('jtimestamp, first, 20 hours east',    $$SELECT ('-0061-01-02 12:00:00'::jtimestamp AT TIME ZONE interval '20:00')::text$$, '-0061-01-01 16:00:00+00'),
+    ('jtimestamp, 1 us before that',        $$SELECT ('-0061-01-02 11:59:59.999999'::jtimestamp AT TIME ZONE interval '20:00')::text$$, 'ERR 22008')
+) v(label, q, expect)
+ORDER BY label;
+
+-- ---------------------------------------------------------------------
+-- infinity, NULL and errors, as core: the same SQLSTATE or value for the same
+-- inputs, jtimestamp and jtimestamptz in turn (the Jalali result is shown through
+-- the cast to core's type, in UTC)
+-- ---------------------------------------------------------------------
+SELECT label, ours, core, ours = core AS same
+FROM (SELECT label,
+        pg_temp.zval('UTC', format('SELECT (%L::jtimestamp AT TIME ZONE %s)::timestamptz::text', val, zexpr)) AS ours,
+        pg_temp.zval('UTC', format('SELECT (%L::jtimestamp::timestamp AT TIME ZONE %s)::text', val, zexpr)) AS core
+      FROM (VALUES
+        ('infinity',                    'infinity',            $$'Asia/Tehran'$$),
+        ('-infinity',                   '-infinity',           $$'Asia/Tehran'$$),
+        ('infinity, interval zone',     'infinity',            $$interval '3:30'$$),
+        ('infinity, unknown zone',      'infinity',            $$'Nowhere/Land'$$),
+        ('unknown zone',                '1403-01-01 00:00:00', $$'Nowhere/Land'$$),
+        ('empty zone name',             '1403-01-01 00:00:00', $$''$$),
+        ('NULL zone',                   '1403-01-01 00:00:00', $$NULL::text$$),
+        ('NULL interval zone',          '1403-01-01 00:00:00', $$NULL::interval$$),
+        ('interval with days',          '1403-01-01 00:00:00', $$interval '1 day'$$),
+        ('interval with months',        '1403-01-01 00:00:00', $$interval '1 month'$$),
+        ('interval with months and time', '1403-01-01 00:00:00', $$interval '1 month 3 hours'$$),
+        ('zone name in other case',     '1403-01-01 00:00:00', $$'asia/tehran'$$),
+        ('POSIX zone',                  '1403-01-01 00:00:00', $$'<+03:30>-03:30'$$)
+      ) v(label, val, zexpr)) x;
+
+SELECT label, ours, core, ours = core AS same
+FROM (SELECT label,
+        pg_temp.zval('UTC', format('SELECT (%L::jtimestamptz AT TIME ZONE %s)::timestamp::text', val, zexpr)) AS ours,
+        pg_temp.zval('UTC', format('SELECT (%L::jtimestamptz::timestamptz AT TIME ZONE %s)::text', val, zexpr)) AS core
+      FROM (VALUES
+        ('infinity',                    'infinity',            $$'Asia/Tehran'$$),
+        ('-infinity',                   '-infinity',           $$'Asia/Tehran'$$),
+        ('infinity, interval zone',     'infinity',            $$interval '3:30'$$),
+        ('infinity, unknown zone',      'infinity',            $$'Nowhere/Land'$$),
+        ('unknown zone',                '1403-01-01 00:00:00+00', $$'Nowhere/Land'$$),
+        ('empty zone name',             '1403-01-01 00:00:00+00', $$''$$),
+        ('NULL zone',                   '1403-01-01 00:00:00+00', $$NULL::text$$),
+        ('NULL interval zone',          '1403-01-01 00:00:00+00', $$NULL::interval$$),
+        ('interval with days',          '1403-01-01 00:00:00+00', $$interval '1 day'$$),
+        ('interval with months',        '1403-01-01 00:00:00+00', $$interval '1 month'$$),
+        ('interval with months and time', '1403-01-01 00:00:00+00', $$interval '1 month 3 hours'$$),
+        ('zone name in other case',     '1403-01-01 00:00:00+00', $$'asia/tehran'$$),
+        ('POSIX zone',                  '1403-01-01 00:00:00+00', $$'<+03:30>-03:30'$$)
+      ) v(label, val, zexpr)) x;
+
+-- NULL value
+SELECT ('1403-01-01 00:00:00'::jtimestamp AT TIME ZONE 'UTC') IS NOT NULL AS value_given,
+       (NULL::jtimestamp AT TIME ZONE 'UTC') IS NULL AS null_jtimestamp,
+       (NULL::jtimestamptz AT TIME ZONE 'UTC') IS NULL AS null_jtimestamptz,
+       (NULL::jtimestamp AT TIME ZONE interval '3:30') IS NULL AS null_jtimestamp_interval,
+       (NULL::jtimestamptz AT TIME ZONE interval '3:30') IS NULL AS null_jtimestamptz_interval;
+
+-- ---------------------------------------------------------------------
+-- against core over a grid: every 97 minutes of Gregorian 2023-03-21 to 2026-03-21
+-- (Jalali 1402 to 1404) as wall clocks, plus every 15 minutes across the two
+-- clock changes of Paris in 2024 and the four of Tehran in 2020 and 2021, where the
+-- gaps and the overlaps are, in five zones, both directions. A mismatch is a row
+-- where the Jalali answer and the Gregorian answer on the same numbers differ.
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE zone_grid AS
+SELECT t::jtimestamp AS wall
+FROM (SELECT generate_series('2023-03-21 00:00:00'::timestamp, '2026-03-21 00:00:00', interval '97 minutes')
+      UNION
+      SELECT generate_series('2024-03-30 22:00:00'::timestamp, '2024-04-01 04:00:00', interval '15 minutes')
+      UNION
+      SELECT generate_series('2024-10-26 22:00:00'::timestamp, '2024-10-28 04:00:00', interval '15 minutes')
+      UNION
+      SELECT generate_series(d - interval '26 hours', d + interval '30 hours', interval '15 minutes')
+      FROM (VALUES ('2020-03-21'::timestamp), ('2020-09-21'), ('2021-03-22'), ('2021-09-22')) c(d)) g(t);
+
+-- the changes really are in the zone data (the offset differs between instants of
+-- each window), so the grid does cross gaps and overlaps
+SELECT zone, d::date AS around, count(DISTINCT (t AT TIME ZONE zone) - (t AT TIME ZONE 'UTC')) > 1 AS offset_changes
+FROM (VALUES ('Asia/Tehran', '2020-03-21'::timestamptz), ('Asia/Tehran', '2020-09-21'),
+             ('Asia/Tehran', '2021-03-22'), ('Asia/Tehran', '2021-09-22'),
+             ('Europe/Paris', '2024-03-31'), ('Europe/Paris', '2024-10-27')) c(zone, d),
+     LATERAL generate_series(d - interval '26 hours', d + interval '30 hours', interval '15 minutes') t
+GROUP BY zone, d
+ORDER BY zone, d;
+
+SELECT z.zone, count(*) AS wall_times,
+       count(*) FILTER (WHERE (g.wall AT TIME ZONE z.zone)::timestamptz
+                              IS DISTINCT FROM (g.wall::timestamp AT TIME ZONE z.zone)) AS wall_to_instant_mismatches,
+       count(*) FILTER (WHERE ((g.wall AT TIME ZONE 'UTC') AT TIME ZONE z.zone)::timestamp
+                              IS DISTINCT FROM ((g.wall::timestamp AT TIME ZONE 'UTC') AT TIME ZONE z.zone)) AS instant_to_wall_mismatches
+FROM zone_grid g,
+     (VALUES ('Asia/Tehran'), ('Asia/Kolkata'), ('Asia/Kathmandu'), ('Europe/Paris'), ('UTC')) z(zone)
+GROUP BY z.zone
+ORDER BY z.zone;
+
+-- the comparison can fail: against core's answer in the wrong zone it finds mismatches
+SELECT count(*) FILTER (WHERE (g.wall AT TIME ZONE 'Asia/Tehran')::timestamptz
+                              IS DISTINCT FROM (g.wall::timestamp AT TIME ZONE 'Asia/Kolkata')) > 0 AS control_detects_a_wrong_zone
+FROM zone_grid g;
+
+-- the round trip: ts AT TIME ZONE z AT TIME ZONE z is ts, outside gaps. The wall
+-- clocks are 12:00 and 18:00 of every day of Jalali 1380 to 1404, far from the changes
+-- of the five zones (they happen between 00:00 and 03:00 local time, and Tehran's at
+-- midnight), and the instants are 12:00 and 18:00 UTC of the same days; every year with
+-- daylight saving time in Tehran (until 1401) and in Paris is in
+SELECT z.zone, count(*) AS wall_clocks,
+       count(*) FILTER (WHERE (w.ts AT TIME ZONE z.zone) AT TIME ZONE z.zone <> w.ts) AS wall_round_trip_failures
+FROM (SELECT g AS ts FROM jgenerate_series('1380-01-01 12:00:00'::jtimestamp, '1404-12-29 12:00:00'::jtimestamp, interval '1 day') g
+      UNION ALL
+      SELECT g FROM jgenerate_series('1380-01-01 18:00:00'::jtimestamp, '1404-12-29 18:00:00'::jtimestamp, interval '1 day') g) w,
+     (VALUES ('Asia/Tehran'), ('Asia/Kolkata'), ('Asia/Kathmandu'), ('Europe/Paris'), ('UTC')) z(zone)
+GROUP BY z.zone
+ORDER BY z.zone;
+SELECT z.zone, count(*) AS instants,
+       count(*) FILTER (WHERE (i.ts AT TIME ZONE z.zone) AT TIME ZONE z.zone <> i.ts) AS instant_round_trip_failures
+FROM (SELECT g AS ts FROM jgenerate_series('1380-01-01 12:00:00+00'::jtimestamptz, '1404-12-29 12:00:00+00'::jtimestamptz, interval '1 day') g
+      UNION ALL
+      SELECT g FROM jgenerate_series('1380-01-01 18:00:00+00'::jtimestamptz, '1404-12-29 18:00:00+00'::jtimestamptz, interval '1 day') g) i,
+     (VALUES ('Asia/Tehran'), ('Asia/Kolkata'), ('Asia/Kathmandu'), ('Europe/Paris'), ('UTC')) z(zone)
+GROUP BY z.zone
+ORDER BY z.zone;
+
+-- ---------------------------------------------------------------------
+-- bare literals: AT TIME ZONE keeps resolving a bare literal to core's
+-- timestamptz (the result is a core timestamp), so adding the new functions
+-- changed nothing there; one typed argument picks ours
+-- ---------------------------------------------------------------------
+SELECT pg_typeof('2024-03-20 12:00:00' AT TIME ZONE 'UTC') AS bare_literal,
+       pg_typeof('2024-03-20 12:00:00'::timestamp AT TIME ZONE 'UTC') AS core_timestamp,
+       pg_typeof('1403-01-01 12:00:00'::jtimestamp AT TIME ZONE 'UTC') AS jtimestamp,
+       pg_typeof('1403-01-01 12:00:00+00'::jtimestamptz AT TIME ZONE 'UTC') AS jtimestamptz;
+-- a zone written as an unknown literal is read as text, so "03:30" is a POSIX zone name
+-- (UTC-3:30, the sign is inverted) unless it is cast to interval
+SELECT pg_temp.zval('UTC', $$SELECT ('1403-01-01 00:00:00'::jtimestamp AT TIME ZONE '03:30')::text$$) AS zone_as_text,
+       pg_temp.zval('UTC', $$SELECT ('1403-01-01 00:00:00'::jtimestamp AT TIME ZONE '03:30'::interval)::text$$) AS zone_as_interval;
+
+-- ---------------------------------------------------------------------
+-- an expression index and a generated column on AT TIME ZONE (IMMUTABLE), and the
+-- cast of the wall clock to a jdate: the index recipe for "the local day of an
+-- instant"
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE zone_t (id int, ts jtimestamp, tz jtimestamptz,
+    local_wall jtimestamp GENERATED ALWAYS AS (tz AT TIME ZONE 'Asia/Tehran') STORED);
+INSERT INTO zone_t (id, ts, tz)
+SELECT g, jtimestamp '1403-01-01 00:00:00' + g * interval '7 hours 13 minutes',
+          jtimestamptz '1403-01-01 00:00:00+00' + g * interval '7 hours 13 minutes'
+FROM generate_series(1, 4000) g;
+CREATE INDEX zone_t_ts ON zone_t ((ts AT TIME ZONE 'Asia/Tehran'));
+CREATE INDEX zone_t_tz ON zone_t ((tz AT TIME ZONE 'Asia/Tehran'));
+CREATE INDEX zone_t_day ON zone_t (((tz AT TIME ZONE 'Asia/Tehran')::jdate));
+ANALYZE zone_t;
+
+SELECT count(*) FILTER (WHERE local_wall <> tz AT TIME ZONE 'Asia/Tehran') AS generated_column_mismatches,
+       count(*) FILTER (WHERE local_wall::timestamp IS DISTINCT FROM (tz::timestamptz AT TIME ZONE 'Asia/Tehran')) AS differences_from_core
+FROM zone_t;
+
+CREATE FUNCTION pg_temp.plan_lines(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $f$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS off) ' || query LOOP
+        RETURN NEXT regexp_replace(line, '^[ ]*(->)?[ ]*', '');
+    END LOOP;
+END
+$f$;
+
+-- row 1000 is the wall clock 1403-10-25 16:40:00 (13:10 UTC as a Tehran wall clock)
+-- and the instant 1403-10-25 16:40:00+00 (20:10 in Tehran)
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT bool_or(l ~ '^Index (Only )?Scan using zone_t_ts') AS jtimestamp_expression_index_used
+FROM pg_temp.plan_lines($q$SELECT id FROM zone_t WHERE (ts AT TIME ZONE 'Asia/Tehran') >= jtimestamptz '1403-10-25 13:00:00+00'
+                                                    AND (ts AT TIME ZONE 'Asia/Tehran') < jtimestamptz '1403-10-25 14:00:00+00'$q$) l;
+SELECT bool_or(l ~ '^Index (Only )?Scan using zone_t_tz') AS jtimestamptz_expression_index_used
+FROM pg_temp.plan_lines($q$SELECT id FROM zone_t WHERE (tz AT TIME ZONE 'Asia/Tehran') >= jtimestamp '1403-10-25 20:00:00'
+                                                    AND (tz AT TIME ZONE 'Asia/Tehran') < jtimestamp '1403-10-25 21:00:00'$q$) l;
+SELECT bool_or(l ~ '^Index (Only )?Scan using zone_t_day') AS local_day_index_used
+FROM pg_temp.plan_lines($q$SELECT id FROM zone_t WHERE (tz AT TIME ZONE 'Asia/Tehran')::jdate = jdate '1403-10-25'$q$) l;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+
+SELECT (SELECT array_agg(id ORDER BY id) FROM zone_t
+        WHERE (ts AT TIME ZONE 'Asia/Tehran') >= jtimestamptz '1403-10-25 13:00:00+00'
+          AND (ts AT TIME ZONE 'Asia/Tehran') < jtimestamptz '1403-10-25 14:00:00+00')
+     = (SELECT array_agg(id ORDER BY id) FROM zone_t
+        WHERE ts >= jtimestamp '1403-10-25 16:30:00' AND ts < jtimestamp '1403-10-25 17:30:00') AS wall_index_answer_equals_the_walls,
+       (SELECT array_agg(id ORDER BY id) FROM zone_t
+        WHERE (tz AT TIME ZONE 'Asia/Tehran')::jdate = jdate '1403-10-25')
+     = (SELECT array_agg(id ORDER BY id) FROM zone_t
+        WHERE tz >= jtimestamptz '1403-10-24 20:30:00+00' AND tz < jtimestamptz '1403-10-25 20:30:00+00') AS local_day_equals_the_instants_of_that_day,
+       (SELECT count(*) FROM zone_t WHERE (tz AT TIME ZONE 'Asia/Tehran')::jdate = jdate '1403-10-25') AS rows_that_day;
+
+-- ---------------------------------------------------------------------
+-- OVERLAPS, four timestamps: (a, b) OVERLAPS (c, d) is a half-open interval test
+-- (an interval whose ends are equal is a point in time). Hand rows, each also run
+-- through core on the Gregorian twins.
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE ov_ts (label text, a text, b text, c text, d text, expect text);
+INSERT INTO ov_ts VALUES
+    ('overlapping',                    '1403-01-01', '1403-01-10', '1403-01-05', '1403-01-15', 't'),
+    ('disjoint',                       '1403-01-01', '1403-01-05', '1403-01-10', '1403-01-15', 'f'),
+    ('touching',                       '1403-01-01', '1403-01-05', '1403-01-05', '1403-01-10', 'f'),
+    ('touching, the other way',        '1403-01-05', '1403-01-10', '1403-01-01', '1403-01-05', 'f'),
+    ('one contains the other',         '1403-01-01', '1403-01-30', '1403-01-10', '1403-01-12', 't'),
+    ('swapped ends of the first',      '1403-01-10', '1403-01-01', '1403-01-05', '1403-01-15', 't'),
+    ('swapped ends of both',           '1403-01-10', '1403-01-01', '1403-01-15', '1403-01-05', 't'),
+    ('a point inside',                 '1403-01-05', '1403-01-05', '1403-01-01', '1403-01-10', 't'),
+    ('a point at the start',           '1403-01-01', '1403-01-01', '1403-01-01', '1403-01-10', 't'),
+    ('a point at the end',             '1403-01-10', '1403-01-10', '1403-01-01', '1403-01-10', 'f'),
+    ('two equal points',               '1403-01-05', '1403-01-05', '1403-01-05', '1403-01-05', 't'),
+    ('two different points',           '1403-01-05', '1403-01-05', '1403-01-06', '1403-01-06', 'f'),
+    ('one microsecond of overlap',     '1403-01-01 10:00:00', '1403-01-01 12:00:00', '1403-01-01 11:59:59.999999', '1403-01-01 14:00:00', 't'),
+    ('touching at the microsecond',    '1403-01-01 10:00:00', '1403-01-01 12:00:00', '1403-01-01 12:00:00', '1403-01-01 14:00:00', 'f'),
+    ('infinite first period',          '-infinity', 'infinity', '1403-01-01', '1403-01-02', 't'),
+    ('infinite end touching',          '1403-01-01', 'infinity', 'infinity', 'infinity', 'f'),
+    ('across the end of Esfand 1402',  '1402-12-28', '1403-01-02', '1402-12-29', '1403-01-01', 't'),
+    ('the first and the last instant', '-0061-01-01 00:00:00', '3177-12-29 23:59:59.999999', '1403-01-01', '1403-01-02', 't'),
+    -- NULL ends: core decides (a NULL end can leave the answer open), ours is shown next to it
+    ('NULL end, other period earlier', '1403-01-01', '1403-01-05', '1403-01-10', NULL, 'NULL'),
+    ('NULL end, decided true',         '1403-01-01', '1403-01-10', '1403-01-05', NULL, 't'),
+    ('NULL start',                     NULL, '1403-01-10', '1403-01-05', '1403-01-15', 't'),
+    ('NULL end, undecided',            '1403-01-01', NULL, '1403-01-05', '1403-01-15', 'NULL');
+
+SELECT label, a, b, c, d,
+       coalesce(((a::jtimestamp, b::jtimestamp) OVERLAPS (c::jtimestamp, d::jtimestamp))::text, 'NULL') AS ours,
+       coalesce(((a::jtimestamp::timestamp, b::jtimestamp::timestamp) OVERLAPS (c::jtimestamp::timestamp, d::jtimestamp::timestamp))::text, 'NULL') AS core, expect
+FROM ov_ts;
+
+-- the grid: 9 values in each of the four places, 6561 combinations, NULL and both
+-- infinities among them: ours equals core's on the Gregorian twins in every one
+CREATE TEMP TABLE ov_vals (v text);
+INSERT INTO ov_vals VALUES ('-0061-01-01 00:00:00'), ('1403-01-01 00:00:00'), ('1403-01-05 00:00:00'),
+    ('1403-01-05 00:00:00.000001'), ('1403-01-10 00:00:00'), ('3177-12-29 23:59:59.999999'),
+    ('infinity'), ('-infinity'), (NULL);
+SELECT count(*) AS combinations,
+       count(*) FILTER (WHERE r IS NOT DISTINCT FROM core) AS same_as_core,
+       count(*) FILTER (WHERE r) AS true_results,
+       count(*) FILTER (WHERE NOT r) AS false_results,
+       count(*) FILTER (WHERE r IS NULL) AS null_results,
+       count(*) FILTER (WHERE r IS DISTINCT FROM core) AS mismatches,
+       count(*) FILTER (WHERE r IS DISTINCT FROM closed_ends) > 0 AS control_closed_ends_differs
+FROM (SELECT ((a.v::jtimestamp, b.v::jtimestamp) OVERLAPS (c.v::jtimestamp, d.v::jtimestamp)) AS r,
+             ((a.v::jtimestamp::timestamp, b.v::jtimestamp::timestamp) OVERLAPS (c.v::jtimestamp::timestamp, d.v::jtimestamp::timestamp)) AS core,
+             -- a wrong implementation to compare against: the ends are not left out
+             (least(a.v::jtimestamp::timestamp, b.v::jtimestamp::timestamp) <= greatest(c.v::jtimestamp::timestamp, d.v::jtimestamp::timestamp)
+              AND least(c.v::jtimestamp::timestamp, d.v::jtimestamp::timestamp) <= greatest(a.v::jtimestamp::timestamp, b.v::jtimestamp::timestamp)) AS closed_ends
+      FROM ov_vals a, ov_vals b, ov_vals c, ov_vals d) x;
+
+-- jtimestamptz: instants with offsets
+CREATE TEMP TABLE ov_tz (label text, a text, b text, c text, d text, expect text);
+INSERT INTO ov_tz VALUES
+    -- 1402-12-29 22:00 UTC is 1403-01-01 01:30 in Tehran
+    ('overlapping across offsets',  '1403-01-01 00:00:00+03:30', '1403-01-01 12:00:00+03:30', '1402-12-29 22:00:00+00', '1403-01-02 00:00:00+03:30', 't'),
+    -- 1403-01-01 08:30 UTC is 12:00 in Tehran
+    ('touching across offsets',     '1403-01-01 00:00:00+03:30', '1403-01-01 12:00:00+03:30', '1403-01-01 08:30:00+00', '1403-01-02 00:00:00+00', 'f'),
+    ('1 us before touching',        '1403-01-01 00:00:00+03:30', '1403-01-01 12:00:00+03:30', '1403-01-01 08:29:59.999999+00', '1403-01-02 00:00:00+00', 't'),
+    ('same instant, other offsets', '1403-01-01 12:00:00+03:30', '1403-01-01 12:00:00+03:30', '1403-01-01 08:30:00+00', '1403-01-01 08:30:00+00', 't'),
+    ('infinite',                    '-infinity', 'infinity', '1403-01-01 00:00:00+00', '1403-01-02 00:00:00+00', 't'),
+    ('first and last valid instant', '-0061-01-01 16:00:00+00', '3177-12-29 07:59:59.999999+00', '1403-01-01 00:00:00+00', '1403-01-02 00:00:00+00', 't');
+
+SELECT label, a, b, c, d,
+       coalesce(((a::jtimestamptz, b::jtimestamptz) OVERLAPS (c::jtimestamptz, d::jtimestamptz))::text, 'NULL') AS ours,
+       coalesce(((a::jtimestamptz::timestamptz, b::jtimestamptz::timestamptz) OVERLAPS (c::jtimestamptz::timestamptz, d::jtimestamptz::timestamptz))::text, 'NULL') AS core, expect
+FROM ov_tz;
+
+-- the grid again with offsets, in four session zones: the answers do not depend on the zone
+CREATE TEMP TABLE ov_vals_tz (v text);
+INSERT INTO ov_vals_tz VALUES ('-0061-01-01 16:00:00+00'), ('1403-01-01 00:00:00+03:30'), ('1403-01-05 00:00:00+00'),
+    ('1403-01-05 00:00:00.000001+00'), ('1403-01-10 00:00:00+02'), ('3177-12-29 07:59:59.999999+00'),
+    ('infinity'), ('-infinity'), (NULL);
+CREATE TEMP TABLE ov_tz_res (zone text, combinations bigint, mismatches bigint, true_results bigint);
+CREATE FUNCTION pg_temp.run_ov_tz(zone text) RETURNS void
+LANGUAGE plpgsql AS $f$
+BEGIN
+    PERFORM set_config('TimeZone', zone, false);
+    INSERT INTO ov_tz_res
+    SELECT zone, count(*), count(*) FILTER (WHERE r IS DISTINCT FROM core), count(*) FILTER (WHERE r)
+    FROM (SELECT ((a.v::jtimestamptz, b.v::jtimestamptz) OVERLAPS (c.v::jtimestamptz, d.v::jtimestamptz)) AS r,
+                 ((a.v::jtimestamptz::timestamptz, b.v::jtimestamptz::timestamptz) OVERLAPS (c.v::jtimestamptz::timestamptz, d.v::jtimestamptz::timestamptz)) AS core
+          FROM ov_vals_tz a, ov_vals_tz b, ov_vals_tz c, ov_vals_tz d) x;
+    PERFORM set_config('TimeZone', 'UTC', false);
+END
+$f$;
+SELECT pg_temp.run_ov_tz(z) FROM unnest(ARRAY['UTC', 'Asia/Tehran', 'Europe/Paris', '<+15:59>-15:59']) z;
+SELECT * FROM ov_tz_res ORDER BY zone;
+
+-- the forms with an interval end are not provided (core would add Gregorian months to a
+-- Jalali value): 42883 for both types, while core has them for its own types
+SELECT form,
+       pg_temp.zval('UTC', format('SELECT %s', replace(replace(q, 'JT', 'jtimestamp'), 'LIT', '''1403-01-01 00:00:00''')))  AS jtimestamp,
+       pg_temp.zval('UTC', format('SELECT %s', replace(replace(q, 'JT', 'jtimestamptz'), 'LIT', '''1403-01-01 00:00:00+00'''))) AS jtimestamptz,
+       pg_temp.zval('UTC', format('SELECT %s', replace(replace(q, 'JT', 'timestamp'), 'LIT', '''2024-03-20 00:00:00'''))) AS core_timestamp
+FROM (VALUES
+    ('(a, interval) overlaps (c, interval)', '(LIT::JT, interval ''1 day'') OVERLAPS (LIT::JT, interval ''2 days'')'),
+    ('(a, b) overlaps (c, interval)',        '(LIT::JT, LIT::JT) OVERLAPS (LIT::JT, interval ''2 days'')'),
+    ('(a, interval) overlaps (c, d)',        '(LIT::JT, interval ''1 day'') OVERLAPS (LIT::JT, LIT::JT)'),
+    ('(a, b) overlaps (c, d)',               '(LIT::JT, LIT::JT) OVERLAPS (LIT::JT, LIT::JT)')
+) v(form, q);
+
+-- bare literals alone are ambiguous (42725) before and after the extension, as in core;
+-- one typed value decides
+SELECT pg_temp.zval('UTC', $$SELECT ('1403-01-01', '1403-01-10') OVERLAPS ('1403-01-05', '1403-01-15')$$) AS bare_literals,
+       pg_temp.zval('UTC', $$SELECT ('1403-01-01'::jtimestamp, '1403-01-10') OVERLAPS ('1403-01-05', '1403-01-15')$$) AS one_jtimestamp,
+       pg_temp.zval('UTC', $$SELECT ('1403-01-01+00'::jtimestamptz, '1403-01-10') OVERLAPS ('1403-01-05', '1403-01-15')$$) AS one_jtimestamptz,
+       pg_temp.zval('UTC', $$SELECT ('1403-01-01'::jtimestamp, '1403-01-10') OVERLAPS ('1403-01-05+00'::jtimestamptz, '1403-01-15')$$) AS mixed_types;

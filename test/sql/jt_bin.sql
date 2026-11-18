@@ -1,0 +1,392 @@
+-- jdate_bin for jtimestamp and jtimestamptz: core's timestamp_bin / timestamptz_bin
+-- plus the range check of the result. Bins are fixed lengths of elapsed time counted
+-- from the origin, so the calendar plays no part except at the lower edge: when the
+-- source is before the origin, the start of its bin lies up to one stride below the
+-- source and can leave the supported range (for jtimestamptz, the safe range).
+--
+-- Checked three ways: hand-computed rows (every Jalali date below was converted by
+-- hand; the Gregorian date is in a comment where it matters), core's own date_bin on
+-- the same numbers (jtimestamp <-> timestamp and jtimestamptz <-> timestamptz casts
+-- are binary, so a Jalali value and its Gregorian twin are the same int64), and the
+-- range edges. Errors are shown as SQLSTATE only, never as message text.
+SET DateStyle = 'ISO, YMD';
+SET IntervalStyle = 'postgres';
+SET timezone = 'UTC';
+
+-- The text of the single value of a query, or "ERR <sqlstate>", under a session
+-- time zone (restored afterwards).
+CREATE FUNCTION pg_temp.zval(zone text, q text) RETURNS text
+LANGUAGE plpgsql AS $f$
+DECLARE
+    r text;
+BEGIN
+    PERFORM set_config('TimeZone', zone, false);
+    BEGIN
+        EXECUTE q INTO r;
+        r := coalesce(r, 'NULL');
+    EXCEPTION WHEN OTHERS THEN
+        r := 'ERR ' || SQLSTATE;
+    END;
+    PERFORM set_config('TimeZone', 'UTC', false);
+    RETURN r;
+END
+$f$;
+
+-- ---------------------------------------------------------------------
+-- catalog: two functions, the volatility, strictness and parallel safety of
+-- core's date_bin for the type each one mirrors
+-- ---------------------------------------------------------------------
+SELECT o.oid::regprocedure AS function, o.prorettype::regtype AS returns,
+       o.provolatile AS volatility, o.proisstrict AS strict, o.proparallel AS parallel,
+       (o.provolatile, o.proisstrict, o.proparallel) =
+       (c.provolatile, c.proisstrict, c.proparallel) AS same_flags_as_core
+FROM (VALUES ('jtimestamp'::regtype, 'timestamp'::regtype),
+             ('jtimestamptz'::regtype, 'timestamptz'::regtype)) m(jt, core)
+JOIN pg_proc o ON o.proname = 'jdate_bin'
+              AND o.proargtypes = format('%s %s %s', 'interval'::regtype::oid, m.jt::oid, m.jt::oid)::oidvector
+JOIN pg_proc c ON c.proname = 'date_bin' AND c.pronamespace = 'pg_catalog'::regnamespace
+              AND c.proargtypes = format('%s %s %s', 'interval'::regtype::oid, m.core::oid, m.core::oid)::oidvector
+ORDER BY o.oid::regprocedure::text;
+
+SELECT count(*) AS jdate_bin_functions FROM pg_proc WHERE proname = 'jdate_bin';
+
+-- ---------------------------------------------------------------------
+-- jtimestamp, hand-computed rows
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE bin_ts (label text, stride text, src text, origin text, expect text);
+INSERT INTO bin_ts VALUES
+    -- origin 1403-01-01 is Gregorian 2024-03-20
+    ('day, origin at midnight',      '1 day',     '1403-05-15 13:45:10',        '1403-01-01 00:00:00', '1403-05-15 00:00:00'),
+    ('hour',                         '1 hour',    '1403-05-15 13:45:10',        '1403-05-15 00:00:00', '1403-05-15 13:00:00'),
+    ('15 minutes',                   '15 minutes','1403-05-15 13:45:10',        '1403-05-15 00:00:00', '1403-05-15 13:45:00'),
+    ('hour, origin at :30',          '1 hour',    '1403-05-15 13:45:10',        '1403-05-15 00:30:00', '1403-05-15 13:30:00'),
+    ('second, microseconds dropped', '1 second',  '1403-05-15 13:45:10.987654', '1403-05-15 00:00:00', '1403-05-15 13:45:10'),
+    ('microsecond stride',           '1 microsecond', '1403-05-15 13:45:10.987654', '1403-05-15 00:00:00', '1403-05-15 13:45:10.987654'),
+    ('2 days',                       '2 days',    '1403-01-04 05:00:00',        '1403-01-01 00:00:00', '1403-01-03 00:00:00'),
+    -- 1403-01-01 + 138 days is 1403-05-15 (4 x 31 + 14); 19 x 7 = 133 days is 1403-05-10
+    ('7 days',                       '7 days',    '1403-05-15 00:00:00',        '1403-01-01 00:00:00', '1403-05-10 00:00:00'),
+    -- before the origin: 1403-01-04 - 4 days is 1402-12-29 (1402 has 29 days in Esfand)
+    ('source before origin',         '2 days',    '1403-01-01 05:00:00',        '1403-01-04 00:00:00', '1402-12-29 00:00:00'),
+    ('source on a bin edge',         '1 day',     '1403-05-15 00:00:00',        '1403-01-01 00:00:00', '1403-05-15 00:00:00'),
+    ('source on an edge before origin', '1 day',  '1402-12-27 00:00:00',        '1403-01-01 00:00:00', '1402-12-27 00:00:00'),
+    ('Esfand of a common year (29 days)', '1 day', '1403-01-01 08:00:00',       '1402-12-29 12:00:00', '1402-12-29 12:00:00'),
+    ('Esfand of a leap year (30 days)', '1 day',  '1403-12-30 17:00:00',        '1403-12-29 00:00:00', '1403-12-30 00:00:00'),
+    ('day and time stride (30 hours)', '1 day 6 hours', '1403-01-03 00:00:00',  '1403-01-01 00:00:00', '1403-01-02 06:00:00'),
+    -- 1403 is a leap year: 1404-06-01 is 366 + 155 days after 1403-01-01, 521 = 365 + 156
+    ('365 days over a leap year',    '365 days',  '1404-06-01 00:00:00',        '1403-01-01 00:00:00', '1403-12-30 00:00:00');
+
+SELECT label, stride, src, origin,
+       jdate_bin(stride::interval, src::jtimestamp, origin::jtimestamp) AS bin_start, expect,
+       jdate_bin(stride::interval, src::jtimestamp, origin::jtimestamp) = expect::jtimestamp AS ok
+FROM bin_ts;
+
+-- the result is a jtimestamp, and a NULL argument gives NULL
+SELECT pg_typeof(jdate_bin('1 day', '1403-05-15 12:00:00'::jtimestamp, '1403-01-01 00:00:00'::jtimestamp)) AS type,
+       jdate_bin('1 day', NULL, '1403-01-01 00:00:00'::jtimestamp) IS NULL AS null_source,
+       jdate_bin('1 day', '1403-05-15 12:00:00'::jtimestamp, NULL) IS NULL AS null_origin,
+       jdate_bin(NULL, '1403-05-15 12:00:00'::jtimestamp, '1403-01-01 00:00:00'::jtimestamp) IS NULL AS null_stride;
+
+-- errors and infinity, as core (SQLSTATE only); the jtimestamp result is shown through
+-- its binary-compatible cast, so both columns are core's text
+SELECT label, ours, core, ours = core AS same
+FROM (SELECT label,
+       pg_temp.zval('UTC', format('SELECT jdate_bin(%L::interval, %L::jtimestamp, %L::jtimestamp)::timestamp', stride, src, origin)) AS ours,
+       pg_temp.zval('UTC', format('SELECT date_bin(%L::interval, %L::timestamp, %L::timestamp)', stride, src, origin)) AS core
+FROM (VALUES
+    ('month stride',          '1 month',          '1403-05-15 12:00:00', '1403-01-01 00:00:00'),
+    ('year stride',           '1 year',           '1403-05-15 12:00:00', '1403-01-01 00:00:00'),
+    ('month and day stride',  '1 month 1 day',    '1403-05-15 12:00:00', '1403-01-01 00:00:00'),
+    ('zero stride',           '0 days',           '1403-05-15 12:00:00', '1403-01-01 00:00:00'),
+    ('negative stride',       '-1 day',           '1403-05-15 12:00:00', '1403-01-01 00:00:00'),
+    ('infinite stride',       'infinity',         '1403-05-15 12:00:00', '1403-01-01 00:00:00'),
+    ('infinite source',       '1 day',            'infinity',            '1403-01-01 00:00:00'),
+    ('negative infinite source', '1 day',         '-infinity',           '1403-01-01 00:00:00'),
+    ('infinite origin',       '1 day',            '1403-05-15 12:00:00', 'infinity'),
+    ('negative infinite origin', '1 day',         '1403-05-15 12:00:00', '-infinity'),
+    ('both infinite',         '1 day',            'infinity',            'infinity')
+) v(label, stride, src, origin)) x;
+
+-- ---------------------------------------------------------------------
+-- jtimestamp, the lower edge. -0061-01-01 is Gregorian 0560-03-20 and 3000-01-01
+-- is 2378-10-11. The report's example: date_bin('365 days', '0560-03-20',
+-- '3000-01-01') is 0559-08-16, a day before the first Jalali day.
+-- ---------------------------------------------------------------------
+SELECT date_bin('365 days', '0560-03-20'::timestamp, '3000-01-01'::timestamp) AS core_result,
+       pg_temp.zval('UTC', $$SELECT jdate_bin('365 days', '-0061-01-01 00:00:00'::jtimestamp, '2378-10-11 00:00:00'::jtimestamp)$$) AS ours;
+
+SELECT label, pg_temp.zval('UTC', q) AS result, expect
+FROM (VALUES
+    ('first instant, origin the same',       $$SELECT jdate_bin('1 day', '-0061-01-01 00:00:00'::jtimestamp, '-0061-01-01 00:00:00'::jtimestamp)$$, '-0061-01-01 00:00:00'),
+    ('first instant, origin 1 us later',     $$SELECT jdate_bin('1 day', '-0061-01-01 00:00:00'::jtimestamp, '-0061-01-01 00:00:00.000001'::jtimestamp)$$, 'ERR 22008'),
+    ('next day, origin 1 us after the first', $$SELECT jdate_bin('1 day', '-0061-01-02 00:00:00'::jtimestamp, '-0061-01-01 00:00:00.000001'::jtimestamp)$$, '-0061-01-01 00:00:00.000001'),
+    ('first instant, origin at noon',        $$SELECT jdate_bin('1 day', '-0061-01-01 00:00:00'::jtimestamp, '-0061-01-01 12:00:00'::jtimestamp)$$, 'ERR 22008'),
+    ('noon of the first day, origin the same', $$SELECT jdate_bin('1 day', '-0061-01-01 12:00:00'::jtimestamp, '-0061-01-01 12:00:00'::jtimestamp)$$, '-0061-01-01 12:00:00'),
+    ('noon of the first day, origin later',  $$SELECT jdate_bin('1 day', '-0061-01-01 12:00:00'::jtimestamp, '-0061-01-01 13:00:00'::jtimestamp)$$, 'ERR 22008'),
+    ('last instant, origin the first',       $$SELECT jdate_bin('1 day', '3177-12-29 23:59:59.999999'::jtimestamp, '-0061-01-01 00:00:00'::jtimestamp)$$, '3177-12-29 00:00:00'),
+    ('last instant, origin the same',        $$SELECT jdate_bin('1 day', '3177-12-29 23:59:59.999999'::jtimestamp, '3177-12-29 23:59:59.999999'::jtimestamp)$$, '3177-12-29 23:59:59.999999'),
+    ('last instant, 1 microsecond stride',   $$SELECT jdate_bin('1 microsecond', '3177-12-29 23:59:59.999999'::jtimestamp, '-0061-01-01 00:00:00'::jtimestamp)$$, '3177-12-29 23:59:59.999999'),
+    ('first instant, origin the last, 1 microsecond stride', $$SELECT jdate_bin('1 microsecond', '-0061-01-01 00:00:00'::jtimestamp, '3177-12-29 23:59:59.999999'::jtimestamp)$$, '-0061-01-01 00:00:00'),
+    ('first instant, origin the last, 1 day stride', $$SELECT jdate_bin('1 day', '-0061-01-01 00:00:00'::jtimestamp, '3177-12-29 23:59:59.999999'::jtimestamp)$$, 'ERR 22008'),
+    ('first instant, origin the last, huge stride', $$SELECT jdate_bin('1000000 days', '-0061-01-01 00:00:00'::jtimestamp, '3177-12-29 23:59:59.999999'::jtimestamp)$$, 'ERR 22008')
+) v(label, q, expect)
+ORDER BY label;
+
+-- ---------------------------------------------------------------------
+-- jtimestamp against core's date_bin: 9 sources x 8 origins x 14 strides = 1008
+-- cases, the edges of the range among them. Every case must give core's answer,
+-- or, where core's bin start lies below the first Jalali day (the only way the
+-- result can leave the range), 22008. The numbers are the same on both sides, so
+-- the two types are compared through the binary-compatible cast.
+-- ---------------------------------------------------------------------
+CREATE FUNCTION pg_temp.try_ours_ts(stride interval, src jtimestamp, origin jtimestamp) RETURNS text
+LANGUAGE plpgsql AS $f$
+BEGIN
+    RETURN jdate_bin(stride, src, origin)::timestamp::text;
+EXCEPTION WHEN OTHERS THEN
+    RETURN 'ERR ' || SQLSTATE;
+END
+$f$;
+CREATE FUNCTION pg_temp.try_core_ts(stride interval, src timestamp, origin timestamp) RETURNS text
+LANGUAGE plpgsql AS $f$
+BEGIN
+    RETURN date_bin(stride, src, origin)::text;
+EXCEPTION WHEN OTHERS THEN
+    RETURN 'ERR ' || SQLSTATE;
+END
+$f$;
+
+CREATE TEMP TABLE sweep_ts AS
+SELECT s.src, o.origin, st.stride,
+       pg_temp.try_ours_ts(st.stride::interval, s.src, o.origin) AS ours,
+       pg_temp.try_core_ts(st.stride::interval, s.src::timestamp, o.origin::timestamp) AS core
+FROM (VALUES ('-0061-01-01 00:00:00'::jtimestamp), ('-0061-01-01 00:00:00.000001'), ('-0061-01-06 00:00:00'),
+             ('1378-10-11 12:00:00'), ('1403-01-01 00:00:00'), ('1403-05-15 13:45:10.987654'),
+             ('1403-12-30 23:59:59.999999'), ('3177-12-29 00:00:00'), ('3177-12-29 23:59:59.999999')) s(src),
+     (VALUES ('-0061-01-01 00:00:00'::jtimestamp), ('-0061-01-01 01:00:00'), ('1378-10-11 00:00:00'),
+             ('1403-01-01 00:00:00'), ('1403-06-31 12:34:56.789'), ('2378-10-11 00:00:00'),
+             ('3177-12-29 23:59:59.999999'), ('3177-12-29 23:59:59.999992')) o(origin),
+     (VALUES ('1 microsecond'), ('1 second'), ('15 minutes'), ('1 hour'), ('1 day'), ('2 days'), ('7 days'),
+             ('365 days'), ('1 day 6 hours'), ('100000 days'), ('-1 day'), ('0 days'), ('1 month'), ('1 year')) st(stride);
+
+SELECT count(*) AS cases,
+       count(*) FILTER (WHERE ours = core) AS same_as_core,
+       count(*) FILTER (WHERE rejected) AS range_check_fired,
+       count(*) FILTER (WHERE ours !~ '^ERR') AS values_returned,
+       count(*) FILTER (WHERE ours <> core AND NOT rejected) AS mismatches
+FROM (SELECT ours, core,
+             ours = 'ERR 22008' AND CASE WHEN core ~ '^ERR' THEN false
+                                         ELSE core::timestamp < '0560-03-20 00:00:00'::timestamp END AS rejected
+      FROM sweep_ts) x;
+
+-- the comparison can fail: against core's answer for a stride one microsecond longer
+-- it finds mismatches
+SELECT count(*) FILTER (WHERE ours <> pg_temp.try_core_ts((stride::interval + interval '1 microsecond')::interval,
+                                                           src::timestamp, origin::timestamp)) > 0 AS control_detects_a_wrong_core
+FROM sweep_ts WHERE stride IN ('1 hour', '1 day', '7 days');
+
+-- ---------------------------------------------------------------------
+-- jtimestamptz: elapsed time, never local days
+-- ---------------------------------------------------------------------
+-- Asia/Tehran (+03:30, no daylight saving time in 2024), origin at UTC midnight:
+-- the bin edges are UTC midnights, 03:30 local. Source 1403-01-01 18:30:00+03:30
+-- is 2024-03-20 15:00 UTC; the report's own example, with 2000-01-01 = 1378-10-11.
+SET timezone = 'Asia/Tehran';
+SELECT jdate_bin('1 day', '1403-01-01 18:30:00+03:30'::jtimestamptz, '1378-10-11 00:00:00+00'::jtimestamptz) AS utc_midnight_origin,
+       jdate_bin('1 day', '1403-01-01 18:30:00+03:30'::jtimestamptz, '1378-10-11 00:00:00+03:30'::jtimestamptz) AS local_midnight_origin,
+       jdate_bin('1 day', '1403-01-01 18:30:00+03:30'::jtimestamptz, '1378-10-11 00:00:00+00'::jtimestamptz)::timestamptz
+         = date_bin('1 day', '2024-03-20 15:00:00+00'::timestamptz, '2000-01-01 00:00:00+00'::timestamptz) AS same_as_core;
+
+-- Europe/Paris, origin at local midnight 1402-10-11 00:00:00+01 (2024-01-01): a day
+-- is 24 hours, so after the clock change of 2024-03-31 (1403-01-12) the bin edges
+-- are 01:00 local until the clock goes back on 2024-10-27 (1403-08-06)
+SET timezone = 'Europe/Paris';
+SELECT label, src, jdate_bin('1 day', src::jtimestamptz, '1402-10-11 00:00:00+01'::jtimestamptz) AS bin_start, expect,
+       jdate_bin('1 day', src::jtimestamptz, '1402-10-11 00:00:00+01'::jtimestamptz)::text = expect AS ok,
+       jdate_bin('1 day', src::jtimestamptz, '1402-10-11 00:00:00+01'::jtimestamptz)::timestamptz
+         = date_bin('1 day', src::jtimestamptz::timestamptz, '2024-01-01 00:00:00+01'::timestamptz) AS same_as_core
+FROM (VALUES
+    ('winter, before the change',  '1403-01-11 12:00:00+01', '1403-01-11 00:00:00+01'),  -- 2024-03-30
+    ('summer (2024-04-15)',        '1403-01-27 12:00:00+02', '1403-01-27 01:00:00+02'),
+    ('summer (2024-07-15)',        '1403-04-25 12:00:00+02', '1403-04-25 01:00:00+02'),
+    ('just after the spring change', '1403-01-12 03:30:00+02', '1403-01-12 00:00:00+01'), -- 2024-03-31 01:30 UTC, the bin starts at 2024-03-30 23:00 UTC
+    ('autumn, before the change',  '1403-08-05 12:00:00+02', '1403-08-05 01:00:00+02'),  -- 2024-10-26
+    ('autumn, after the change',   '1403-08-07 12:00:00+01', '1403-08-07 00:00:00+01'),  -- 2024-10-28
+    ('winter again (2024-11-15)',  '1403-08-25 12:00:00+01', '1403-08-25 00:00:00+01')
+) v(label, src, expect);
+SET timezone = 'UTC';
+
+-- The result does not depend on the session zone: same instants under UTC, Tehran,
+-- Paris and the zones at the largest offsets (POSIX names, the sign is inverted)
+SELECT count(DISTINCT r) AS distinct_instants, count(*) AS zones
+FROM (SELECT pg_temp.zval(z, $$SELECT (jdate_bin('1 day', '1403-05-15 13:45:10.5+00'::jtimestamptz, '1403-01-01 00:00:00+03:30'::jtimestamptz))::timestamptz AT TIME ZONE 'UTC'$$) AS r
+      FROM unnest(ARRAY['UTC', 'Asia/Tehran', 'Europe/Paris', '<+15:59>-15:59', '<-15:59>+15:59']) z) q;
+
+-- ---------------------------------------------------------------------
+-- jtimestamptz, hand-computed rows at the edges of the safe range. The safe range
+-- is [first day start + 16 h, last day end - 16 h): the first valid instant is
+-- -0061-01-01 16:00:00+00, the last 3177-12-29 07:59:59.999999+00.
+-- ---------------------------------------------------------------------
+SELECT label, pg_temp.zval('UTC', q) AS result, expect
+FROM (VALUES
+    ('first instant, origin the same',   $$SELECT jdate_bin('1 day', '-0061-01-01 16:00:00+00'::jtimestamptz, '-0061-01-01 16:00:00+00'::jtimestamptz)$$, '-0061-01-01 16:00:00+00'),
+    ('first instant, origin 1 us later', $$SELECT jdate_bin('1 day', '-0061-01-01 16:00:00+00'::jtimestamptz, '-0061-01-01 16:00:00.000001+00'::jtimestamptz)$$, 'ERR 22008'),
+    ('first instant, origin a day later', $$SELECT jdate_bin('1 day', '-0061-01-01 16:00:00+00'::jtimestamptz, '-0061-01-02 16:00:00+00'::jtimestamptz)$$, '-0061-01-01 16:00:00+00'),
+    ('first instant, origin an hour later', $$SELECT jdate_bin('1 day', '-0061-01-01 16:00:00+00'::jtimestamptz, '-0061-01-01 17:00:00+00'::jtimestamptz)$$, 'ERR 22008'),
+    -- the bin start 09:00 is inside the Jalali range but in the 16 hours that the safe range leaves out
+    ('start inside the 16 hours margin', $$SELECT jdate_bin('10 hours', '-0061-01-01 17:00:00+00'::jtimestamptz, '-0061-01-01 19:00:00+00'::jtimestamptz)$$, 'ERR 22008'),
+    ('the same wall times as a jtimestamp', $$SELECT jdate_bin('10 hours', '-0061-01-01 17:00:00'::jtimestamp, '-0061-01-01 19:00:00'::jtimestamp)$$, '-0061-01-01 09:00:00'),
+    ('last instant, origin the first',  $$SELECT jdate_bin('1 hour', '3177-12-29 07:59:59.999999+00'::jtimestamptz, '-0061-01-01 16:00:00+00'::jtimestamptz)$$, '3177-12-29 07:00:00+00'),
+    ('last instant, origin the same',   $$SELECT jdate_bin('1 day', '3177-12-29 07:59:59.999999+00'::jtimestamptz, '3177-12-29 07:59:59.999999+00'::jtimestamptz)$$, '3177-12-29 07:59:59.999999+00'),
+    ('first instant, origin the last, 1 microsecond stride', $$SELECT jdate_bin('1 microsecond', '-0061-01-01 16:00:00+00'::jtimestamptz, '3177-12-29 07:59:59.999999+00'::jtimestamptz)$$, '-0061-01-01 16:00:00+00'),
+    ('first instant, origin the last, 1 day stride', $$SELECT jdate_bin('1 day', '-0061-01-01 16:00:00+00'::jtimestamptz, '3177-12-29 07:59:59.999999+00'::jtimestamptz)$$, 'ERR 22008')
+) v(label, q, expect)
+ORDER BY label;
+
+-- the first and the last valid instant as bin starts display in every zone,
+-- including the largest offsets (the point of the safe range)
+SELECT z.name,
+       pg_temp.zval(z.zone, $$SELECT jdate_bin('1 day', '-0061-01-01 16:00:00+00'::jtimestamptz, '-0061-01-01 16:00:00+00'::jtimestamptz)$$) AS first_instant,
+       pg_temp.zval(z.zone, $$SELECT jdate_bin('1 day', '3177-12-29 07:59:59.999999+00'::jtimestamptz, '3177-12-29 07:59:59.999999+00'::jtimestamptz)$$) AS last_instant
+FROM (VALUES ('+15:59', '<+15:59>-15:59'), ('-15:59', '<-15:59>+15:59')) z(name, zone)
+ORDER BY 1;
+
+-- errors and infinity, as core (the result shown through the cast to timestamptz, in UTC)
+SELECT label, ours, core, ours = core AS same
+FROM (SELECT label,
+       pg_temp.zval('UTC', format('SELECT jdate_bin(%L::interval, %L::jtimestamptz, %L::jtimestamptz)::timestamptz', stride, src, origin)) AS ours,
+       pg_temp.zval('UTC', format('SELECT date_bin(%L::interval, %L::timestamptz, %L::timestamptz)', stride, src, origin)) AS core
+FROM (VALUES
+    ('month stride',          '1 month',       '1403-05-15 12:00:00+00', '1403-01-01 00:00:00+00'),
+    ('year stride',           '1 year',        '1403-05-15 12:00:00+00', '1403-01-01 00:00:00+00'),
+    ('zero stride',           '0 days',        '1403-05-15 12:00:00+00', '1403-01-01 00:00:00+00'),
+    ('negative stride',       '-1 day',        '1403-05-15 12:00:00+00', '1403-01-01 00:00:00+00'),
+    ('infinite stride',       'infinity',      '1403-05-15 12:00:00+00', '1403-01-01 00:00:00+00'),
+    ('infinite source',       '1 day',         'infinity',               '1403-01-01 00:00:00+00'),
+    ('negative infinite source', '1 day',      '-infinity',              '1403-01-01 00:00:00+00'),
+    ('infinite origin',       '1 day',         '1403-05-15 12:00:00+00', 'infinity'),
+    ('both infinite',         '1 day',         'infinity',               'infinity')
+) v(label, stride, src, origin)) x;
+
+-- ---------------------------------------------------------------------
+-- jtimestamptz against core's date_bin: the same sweep over instants, repeated in
+-- four session zones (the answer must not depend on the zone). Core's start lies
+-- below the first safe instant, 0560-03-20 16:00:00+00, for the cases the range check
+-- must reject.
+-- ---------------------------------------------------------------------
+CREATE FUNCTION pg_temp.try_ours_tz(stride interval, src jtimestamptz, origin jtimestamptz) RETURNS text
+LANGUAGE plpgsql AS $f$
+BEGIN
+    RETURN (jdate_bin(stride, src, origin)::timestamptz AT TIME ZONE 'UTC')::text;
+EXCEPTION WHEN OTHERS THEN
+    RETURN 'ERR ' || SQLSTATE;
+END
+$f$;
+CREATE FUNCTION pg_temp.try_core_tz(stride interval, src timestamptz, origin timestamptz) RETURNS text
+LANGUAGE plpgsql AS $f$
+BEGIN
+    RETURN (date_bin(stride, src, origin) AT TIME ZONE 'UTC')::text;
+EXCEPTION WHEN OTHERS THEN
+    RETURN 'ERR ' || SQLSTATE;
+END
+$f$;
+
+CREATE TEMP TABLE sweep_tz_in AS
+SELECT s.src, o.origin, st.stride
+FROM (VALUES ('-0061-01-01 16:00:00+00'::jtimestamptz), ('-0061-01-01 16:00:00.000001+00'), ('-0061-01-06 00:00:00+00'),
+             ('1378-10-11 12:00:00+00'), ('1403-01-01 00:00:00+03:30'), ('1403-05-15 13:45:10.987654+02'),
+             ('1403-12-30 23:59:59.999999+00'), ('3177-12-29 00:00:00+00'), ('3177-12-29 07:59:59.999999+00')) s(src),
+     (VALUES ('-0061-01-01 16:00:00+00'::jtimestamptz), ('-0061-01-01 17:00:00+00'), ('1378-10-11 00:00:00+00'),
+             ('1403-01-01 00:00:00+03:30'), ('1403-06-31 12:34:56.789+02'), ('2378-10-11 00:00:00+00'),
+             ('3177-12-29 07:59:59.999999+00'), ('3177-12-29 07:59:59.999992+00')) o(origin),
+     (VALUES ('1 microsecond'), ('1 second'), ('15 minutes'), ('1 hour'), ('1 day'), ('2 days'), ('7 days'),
+             ('365 days'), ('1 day 6 hours'), ('100000 days'), ('-1 day'), ('0 days'), ('1 month'), ('1 year')) st(stride);
+
+CREATE TEMP TABLE sweep_tz_res (zone text, cases bigint, same_as_core bigint, range_check_fired bigint,
+                                values_returned bigint, mismatches bigint);
+CREATE FUNCTION pg_temp.run_sweep_tz(zone text) RETURNS void
+LANGUAGE plpgsql AS $f$
+BEGIN
+    PERFORM set_config('TimeZone', zone, false);
+    INSERT INTO sweep_tz_res
+    SELECT zone, count(*),
+           count(*) FILTER (WHERE ours = core),
+           count(*) FILTER (WHERE rejected),
+           count(*) FILTER (WHERE ours !~ '^ERR'),
+           count(*) FILTER (WHERE ours <> core AND NOT rejected)
+    FROM (SELECT ours, core,
+                 ours = 'ERR 22008' AND CASE WHEN core ~ '^ERR' THEN false
+                                             ELSE core::timestamp < '0560-03-20 16:00:00'::timestamp END AS rejected
+          FROM (SELECT pg_temp.try_ours_tz(stride::interval, src, origin) AS ours,
+                       pg_temp.try_core_tz(stride::interval, src::timestamptz, origin::timestamptz) AS core
+                FROM sweep_tz_in) y) x;
+    PERFORM set_config('TimeZone', 'UTC', false);
+END
+$f$;
+SELECT pg_temp.run_sweep_tz(z) FROM unnest(ARRAY['UTC', 'Asia/Tehran', 'Europe/Paris', '<+15:59>-15:59']) z;
+SELECT * FROM sweep_tz_res ORDER BY zone;
+
+-- ---------------------------------------------------------------------
+-- IMMUTABLE: a generated column and an expression index take jdate_bin; the
+-- planner uses the index, and the answers equal a scan without it
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE bin_t (id int, ts jtimestamp, tz jtimestamptz,
+    day_bin jtimestamp GENERATED ALWAYS AS (jdate_bin(interval '1 day', ts, jtimestamp '1403-01-01 00:00:00')) STORED);
+INSERT INTO bin_t (id, ts, tz)
+SELECT g, jtimestamp '1403-01-01 00:00:00' + g * interval '7 hours 13 minutes',
+          jtimestamptz '1403-01-01 00:00:00+03:30' + g * interval '7 hours 13 minutes'
+FROM generate_series(1, 4000) g;
+CREATE INDEX bin_t_ts ON bin_t (jdate_bin(interval '1 hour', ts, jtimestamp '1403-01-01 00:00:00'));
+CREATE INDEX bin_t_tz ON bin_t (jdate_bin(interval '1 hour', tz, jtimestamptz '1403-01-01 00:00:00+00'));
+ANALYZE bin_t;
+
+SELECT count(DISTINCT day_bin) AS days, min(day_bin) AS first_day, max(day_bin) AS last_day,
+       count(*) FILTER (WHERE day_bin <> jdate_bin('1 day', ts, '1403-01-01 00:00:00'::jtimestamp)) AS generated_column_mismatches
+FROM bin_t;
+
+CREATE FUNCTION pg_temp.plan_lines(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $f$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS off) ' || query LOOP
+        RETURN NEXT regexp_replace(line, '^[ ]*(->)?[ ]*', '');
+    END LOOP;
+END
+$f$;
+
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT bool_or(l ~ '^Index (Only )?Scan using bin_t_ts') AS ts_expression_index_used
+FROM pg_temp.plan_lines($q$SELECT id FROM bin_t WHERE jdate_bin(interval '1 hour', ts, jtimestamp '1403-01-01 00:00:00') = jtimestamp '1403-10-25 16:00:00'$q$) l;
+SELECT bool_or(l ~ '^Index (Only )?Scan using bin_t_tz') AS tz_expression_index_used
+FROM pg_temp.plan_lines($q$SELECT id FROM bin_t WHERE jdate_bin(interval '1 hour', tz, jtimestamptz '1403-01-01 00:00:00+00') = jtimestamptz '1403-10-25 13:00:00+00'$q$) l;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+
+-- row 1000 is 1403-10-25 16:40:00 (and 13:10:00 UTC for the jtimestamptz column), so
+-- both hours have rows; the rows found through the expression are the rows of the hour
+SELECT (SELECT array_agg(id ORDER BY id) FROM bin_t
+        WHERE jdate_bin(interval '1 hour', ts, jtimestamp '1403-01-01 00:00:00') = jtimestamp '1403-10-25 16:00:00')
+     = (SELECT array_agg(id ORDER BY id) FROM bin_t
+        WHERE ts >= jtimestamp '1403-10-25 16:00:00' AND ts < jtimestamp '1403-10-25 17:00:00') AS index_answer_equals_range_answer,
+       (SELECT count(*) FROM bin_t
+        WHERE jdate_bin(interval '1 hour', ts, jtimestamp '1403-01-01 00:00:00') = jtimestamp '1403-10-25 16:00:00') AS rows_in_the_hour,
+       (SELECT array_agg(id ORDER BY id) FROM bin_t
+        WHERE jdate_bin(interval '1 hour', tz, jtimestamptz '1403-01-01 00:00:00+00') = jtimestamptz '1403-10-25 13:00:00+00')
+     = (SELECT array_agg(id ORDER BY id) FROM bin_t
+        WHERE tz >= jtimestamptz '1403-10-25 13:00:00+00' AND tz < jtimestamptz '1403-10-25 14:00:00+00') AS tz_index_answer_equals_range_answer,
+       (SELECT count(*) FROM bin_t
+        WHERE jdate_bin(interval '1 hour', tz, jtimestamptz '1403-01-01 00:00:00+00') = jtimestamptz '1403-10-25 13:00:00+00') AS tz_rows_in_the_hour;
+
+-- ---------------------------------------------------------------------
+-- bare literals: jdate_bin has its own name, so core's date_bin keeps resolving a
+-- bare literal to its own timestamptz, and jdate_bin on bare literals alone is
+-- ambiguous (42725), never the wrong calendar
+-- ---------------------------------------------------------------------
+SELECT pg_typeof(date_bin('1 day', '2024-03-20 12:00', '2000-01-01')) AS date_bin_on_literals;
+SELECT pg_temp.zval('UTC', $$SELECT jdate_bin('1 day', '1403-05-15 12:00', '1403-01-01')$$) AS jdate_bin_on_literals;
+SELECT pg_temp.zval('UTC', $$SELECT jdate_bin('1 day', '1403-05-15 12:00:00'::jtimestamp, '1403-01-01')$$) AS one_typed_argument_decides_ts,
+       pg_temp.zval('UTC', $$SELECT jdate_bin('1 day', '1403-05-15 12:00:00+00'::jtimestamptz, '1403-01-01 00:00:00+00')$$) AS one_typed_argument_decides_tz;
+-- no implicit casts between the types, and core's date_bin does not take ours
+SELECT pg_temp.zval('UTC', $$SELECT jdate_bin('1 day', '1403-05-15 12:00:00'::jtimestamp, '1403-01-01 00:00:00+00'::jtimestamptz)$$) AS mixed_types,
+       pg_temp.zval('UTC', $$SELECT date_bin('1 day', '1403-05-15 12:00:00'::jtimestamp, '1403-01-01 00:00:00'::jtimestamp)$$) AS core_date_bin_on_ours;

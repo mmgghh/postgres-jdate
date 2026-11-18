@@ -1313,3 +1313,56 @@ CREATE FUNCTION jgenerate_series(jdate, jdate, interval) RETURNS SETOF jtimestam
     AS 'MODULE_PATHNAME', 'jgenerate_series_jdate_interval' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 CREATE FUNCTION jgenerate_series(jdate, jdate, int DEFAULT 1) RETURNS SETOF jdate
     AS 'MODULE_PATHNAME', 'jgenerate_series_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- ============================================================
+-- jdate_bin, AT TIME ZONE and OVERLAPS
+-- ============================================================
+--
+-- None of these depends on the calendar, so each one is core's own C function on
+-- the same representation, plus the range check of the result where it is a new
+-- value. The C code is in src/jtimestamp_zone.c.
+--
+-- jdate_bin(stride, source, origin) has its own name because a bare literal given
+-- to core's date_bin would pick core's timestamptz. IMMUTABLE for both types, as
+-- core's. The bins are fixed lengths of elapsed time counted from the origin: for
+-- jtimestamptz a one-day bin is a local day only in a zone with a fixed offset and
+-- an origin at local midnight (use jdate_trunc for local days). A month or a year
+-- in the stride is 0A000, a zero stride 22008, infinity gives infinity, as in
+-- core. When the source is before the origin the start of its bin lies up to one
+-- stride below the source, which can be below the supported range: that is 22008
+-- (for jtimestamptz the bound is the safe range).
+--
+-- x AT TIME ZONE zone desugars to pg_catalog.timezone(zone, x), so the functions
+-- must live in pg_catalog (as extract() does; the extension is not relocatable for
+-- that reason). jtimestamp AT TIME ZONE reads the wall clock in the zone and gives
+-- the jtimestamptz instant; jtimestamptz AT TIME ZONE gives the jtimestamp wall
+-- clock of the instant in the zone. The zone is a name or, as in core, an interval
+-- (a plain offset: months or days in it are an error). Gaps and overlaps are core's.
+-- IMMUTABLE as core's, and the result is range-checked (22008): the safe range for
+-- the jtimestamptz result, the Jalali range for the jtimestamp result. Core's AT
+-- LOCAL forms (timezone with one argument) are not provided.
+--
+-- (a, b) OVERLAPS (c, d) desugars to pg_catalog.overlaps. Only the four-timestamp
+-- forms exist. Core's forms that take an interval for an end are not provided: core
+-- would add Gregorian months to a Jalali value, so they stay 42883. The functions
+-- are not STRICT, as core's overlaps_timestamp is not (it handles a NULL end).
+-- IMMUTABLE for both types, as core's.
+
+CREATE FUNCTION jdate_bin(interval, jtimestamp, jtimestamp) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jdate_bin_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_bin(interval, jtimestamptz, jtimestamptz) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jdate_bin_jtimestamptz' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.timezone(text, jtimestamp) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jtimestamp_zone' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.timezone(interval, jtimestamp) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jtimestamp_izone' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.timezone(text, jtimestamptz) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jtimestamptz_zone' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.timezone(interval, jtimestamptz) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jtimestamptz_izone' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pg_catalog.overlaps(jtimestamp, jtimestamp, jtimestamp, jtimestamp) RETURNS boolean
+    AS 'MODULE_PATHNAME', 'jtimestamp_overlaps' LANGUAGE C IMMUTABLE PARALLEL SAFE;
+CREATE FUNCTION pg_catalog.overlaps(jtimestamptz, jtimestamptz, jtimestamptz, jtimestamptz) RETURNS boolean
+    AS 'MODULE_PATHNAME', 'jtimestamptz_overlaps' LANGUAGE C IMMUTABLE PARALLEL SAFE;
