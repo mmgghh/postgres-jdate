@@ -260,6 +260,73 @@ SELECT 'today'::jtimestamp::text = jdate_format(now(), false) || ' 00:00:00' AS 
 (1 row)
 
 SET timezone = 'UTC';
+-- whitespace before and after a special word is accepted, as it is around a date,
+-- and the value is the one without it. Space, tab, newline and carriage return
+-- count as whitespace.
+SELECT ' infinity'::jtimestamp, 'infinity '::jtimestamp, '  -infinity  '::jtimestamp;
+ jtimestamp | jtimestamp | jtimestamp 
+------------+------------+------------
+ infinity   | infinity   | -infinity
+(1 row)
+
+SELECT E'\t-INFINITY\n'::jtimestamp, E'\r\n Infinity \t'::jtimestamp;
+ jtimestamp | jtimestamp 
+------------+------------
+ -infinity  | infinity
+(1 row)
+
+SELECT ' epoch'::jtimestamp, 'epoch '::jtimestamp, E'\n epoch\t '::jtimestamp;
+     jtimestamp      |     jtimestamp      |     jtimestamp      
+---------------------+---------------------+---------------------
+ 1348-10-11 00:00:00 | 1348-10-11 00:00:00 | 1348-10-11 00:00:00
+(1 row)
+
+SELECT ' infinity '::jtimestamp(0), ' epoch '::jtimestamp(3);
+ jtimestamp |     jtimestamp      
+------------+---------------------
+ infinity   | 1348-10-11 00:00:00
+(1 row)
+
+SELECT ' now'::jtimestamp = 'now'::jtimestamp AS now_leading,
+       'now '::jtimestamp = 'now'::jtimestamp AS now_trailing,
+       E'\t NOW\n'::jtimestamp = 'now'::jtimestamp AS now_both;
+ now_leading | now_trailing | now_both 
+-------------+--------------+----------
+ t           | t            | t
+(1 row)
+
+SELECT ' today'::jtimestamp = 'today'::jtimestamp AS today_leading,
+       'tomorrow  '::jtimestamp = 'tomorrow'::jtimestamp AS tomorrow_trailing,
+       ' yesterday '::jtimestamp = 'yesterday'::jtimestamp AS yesterday_both;
+ today_leading | tomorrow_trailing | yesterday_both 
+---------------+-------------------+----------------
+ t             | t                 | t
+(1 row)
+
+SELECT ' today '::jtimestamp::text = jdate_format(now(), false) || ' 00:00:00' AS today_padded_matches;
+ today_padded_matches 
+----------------------
+ t
+(1 row)
+
+-- in an array literal (a quoted element keeps its whitespace) and in a column
+SELECT '{" epoch ","infinity ", " -infinity"}'::jtimestamp[] AS padded_array;
+                padded_array                
+--------------------------------------------
+ {"1348-10-11 00:00:00",infinity,-infinity}
+(1 row)
+
+CREATE TEMP TABLE jt_io_pad (t jtimestamp);
+INSERT INTO jt_io_pad VALUES (' infinity '), (' -infinity'), ('epoch  ');
+SELECT t FROM jt_io_pad ORDER BY t;
+          t          
+---------------------
+ -infinity
+ 1348-10-11 00:00:00
+ infinity
+(3 rows)
+
+DROP TABLE jt_io_pad;
 -- ---------------------------------------------------------------------
 -- errors
 -- ---------------------------------------------------------------------
@@ -277,11 +344,27 @@ SELECT 'garbage'::jtimestamp;
 ERROR:  22007
 SELECT ''::jtimestamp;
 ERROR:  22007
-SELECT ' now'::jtimestamp;                     -- the words are matched exactly
+SELECT 'nowhere'::jtimestamp;                  -- the words are matched exactly
 ERROR:  22007
-SELECT 'now '::jtimestamp;
+SELECT 'now today'::jtimestamp;                -- two words
 ERROR:  22007
-SELECT 'nowhere'::jtimestamp;
+SELECT '- infinity'::jtimestamp;               -- no space inside a word
+ERROR:  22007
+SELECT 'in finity'::jtimestamp;
+ERROR:  22007
+SELECT '  '::jtimestamp;                       -- only whitespace
+ERROR:  22007
+SELECT E'\t\n'::jtimestamp;
+ERROR:  22007
+SELECT 'infinity 1403-01-01'::jtimestamp;      -- a word and then a date, or a time
+ERROR:  22007
+SELECT 'epoch 12:00'::jtimestamp;
+ERROR:  22007
+SELECT ' now 12:00 '::jtimestamp;
+ERROR:  22007
+SELECT ' allballs '::jtimestamp;               -- whitespace does not widen the list
+ERROR:  22007
+SELECT ' March 20, 2024 12:00 '::jtimestamp;
 ERROR:  22007
 SELECT '1403-05'::jtimestamp;
 ERROR:  22007
@@ -374,6 +457,27 @@ FROM (VALUES ('garbage'), ('1403-05-15 12:00 1403-05-16'), ('1403-13-01 12:00'),
  1403-01-01 12:00 Nowhere/Zone | 22023
  1403-01-01 12:00 +17:00       | 22009
 (8 rows)
+
+SELECT pg_input_is_valid(' epoch ', 'jtimestamp') AS padded_epoch,
+       pg_input_is_valid(E'\t-infinity\n', 'jtimestamp') AS padded_minus_infinity,
+       pg_input_is_valid(' now ', 'jtimestamp') AS padded_now,
+       pg_input_is_valid('- infinity', 'jtimestamp') AS space_inside,
+       pg_input_is_valid('  ', 'jtimestamp') AS whitespace_only,
+       pg_input_is_valid(' allballs ', 'jtimestamp') AS padded_allballs;
+ padded_epoch | padded_minus_infinity | padded_now | space_inside | whitespace_only | padded_allballs 
+--------------+-----------------------+------------+--------------+-----------------+-----------------
+ t            | t                     | t          | f            | f               | f
+(1 row)
+
+SELECT s, (pg_input_error_info(s, 'jtimestamp')).sql_error_code AS sqlstate
+FROM (VALUES ('- infinity'), ('  '), (' now today '), (' epoch 1403-01-01 ')) v(s);
+         s          | sqlstate 
+--------------------+----------
+ - infinity         | 22007
+                    | 22007
+  now today         | 22007
+  epoch 1403-01-01  | 22007
+(4 rows)
 
 SELECT pg_input_is_valid('{"1403-01-01 12:00","1403-12-29 23:59:59"}', 'jtimestamp[]') AS good_array,
        pg_input_is_valid('{"1403-01-01 12:00","1403-01-01 25:00"}', 'jtimestamp[]') AS bad_element,
@@ -1170,6 +1274,80 @@ SELECT left('now'::jtimestamptz::text, 10) = jdate_format(now(), false) AS now_d
 (1 row)
 
 SET timezone = 'UTC';
+-- whitespace before and after a special word is accepted, and the value is the
+-- one without it (see the jtimestamp section)
+SELECT ' infinity'::jtimestamptz, 'infinity '::jtimestamptz, '  -infinity  '::jtimestamptz;
+ jtimestamptz | jtimestamptz | jtimestamptz 
+--------------+--------------+--------------
+ infinity     | infinity     | -infinity
+(1 row)
+
+SELECT E'\t-INFINITY\n'::jtimestamptz, E'\r\n Infinity \t'::jtimestamptz;
+ jtimestamptz | jtimestamptz 
+--------------+--------------
+ -infinity    | infinity
+(1 row)
+
+SELECT ' epoch'::jtimestamptz AS epoch_leading, 'epoch '::jtimestamptz AS epoch_trailing,
+       E'\n epoch\t '::jtimestamptz AS epoch_both;
+     epoch_leading      |     epoch_trailing     |       epoch_both       
+------------------------+------------------------+------------------------
+ 1348-10-11 00:00:00+00 | 1348-10-11 00:00:00+00 | 1348-10-11 00:00:00+00
+(1 row)
+
+SET timezone = 'Asia/Tehran';
+SELECT ' epoch '::jtimestamptz AS epoch_both_tehran;
+     epoch_both_tehran     
+---------------------------
+ 1348-10-11 03:30:00+03:30
+(1 row)
+
+SET timezone = 'UTC';
+SELECT ' infinity '::jtimestamptz(0), ' epoch '::jtimestamptz(3);
+ jtimestamptz |      jtimestamptz      
+--------------+------------------------
+ infinity     | 1348-10-11 00:00:00+00
+(1 row)
+
+SELECT ' now'::jtimestamptz = 'now'::jtimestamptz AS now_leading,
+       'now '::jtimestamptz = 'now'::jtimestamptz AS now_trailing,
+       E'\t NOW\n'::jtimestamptz = 'now'::jtimestamptz AS now_both;
+ now_leading | now_trailing | now_both 
+-------------+--------------+----------
+ t           | t            | t
+(1 row)
+
+SELECT ' today'::jtimestamptz = 'today'::jtimestamptz AS today_leading,
+       'tomorrow  '::jtimestamptz = 'tomorrow'::jtimestamptz AS tomorrow_trailing,
+       ' yesterday '::jtimestamptz = 'yesterday'::jtimestamptz AS yesterday_both;
+ today_leading | tomorrow_trailing | yesterday_both 
+---------------+-------------------+----------------
+ t             | t                 | t
+(1 row)
+
+SELECT ' today '::jtimestamptz::text = jdate_format(now(), false) || ' 00:00:00+00' AS today_padded_matches;
+ today_padded_matches 
+----------------------
+ t
+(1 row)
+
+SELECT '{" epoch ","infinity ", " -infinity"}'::jtimestamptz[] AS padded_array;
+                 padded_array                  
+-----------------------------------------------
+ {"1348-10-11 00:00:00+00",infinity,-infinity}
+(1 row)
+
+CREATE TEMP TABLE jt_io_tzpad (t jtimestamptz);
+INSERT INTO jt_io_tzpad VALUES (' infinity '), (' -infinity'), ('epoch  ');
+SELECT t FROM jt_io_tzpad ORDER BY t;
+           t            
+------------------------
+ -infinity
+ 1348-10-11 00:00:00+00
+ infinity
+(3 rows)
+
+DROP TABLE jt_io_tzpad;
 -- ---------------------------------------------------------------------
 -- errors
 -- ---------------------------------------------------------------------
@@ -1187,11 +1365,29 @@ SELECT 'garbage'::jtimestamptz;
 ERROR:  22007
 SELECT ''::jtimestamptz;
 ERROR:  22007
-SELECT ' now'::jtimestamptz;
+SELECT 'nowhere'::jtimestamptz;                -- the words are matched exactly
 ERROR:  22007
-SELECT 'now '::jtimestamptz;
+SELECT 'now today'::jtimestamptz;              -- two words
 ERROR:  22007
-SELECT 'nowhere'::jtimestamptz;
+SELECT '- infinity'::jtimestamptz;             -- no space inside a word
+ERROR:  22007
+SELECT 'in finity'::jtimestamptz;
+ERROR:  22007
+SELECT '  '::jtimestamptz;                     -- only whitespace
+ERROR:  22007
+SELECT E'\t\n'::jtimestamptz;
+ERROR:  22007
+SELECT 'infinity 1403-01-01'::jtimestamptz;    -- a word and then a date, a time or a zone
+ERROR:  22007
+SELECT 'epoch 12:00+00'::jtimestamptz;
+ERROR:  22007
+SELECT 'epoch +03:30'::jtimestamptz;
+ERROR:  22007
+SELECT ' now 12:00 '::jtimestamptz;
+ERROR:  22007
+SELECT ' allballs '::jtimestamptz;             -- whitespace does not widen the list
+ERROR:  22007
+SELECT ' March 20, 2024 12:00+00 '::jtimestamptz;
 ERROR:  22007
 SELECT '1403-05'::jtimestamptz;
 ERROR:  22007
@@ -1290,6 +1486,27 @@ FROM (VALUES ('garbage'), ('1403-05-15 12:00+00 1403-05-16'), ('1403-13-01 12:00
  1403-01-01 12:00+16:00         | 22009
  1403-01-01 12:00+15:59:59      | 
 (10 rows)
+
+SELECT pg_input_is_valid(' epoch ', 'jtimestamptz') AS padded_epoch,
+       pg_input_is_valid(E'\t-infinity\n', 'jtimestamptz') AS padded_minus_infinity,
+       pg_input_is_valid(' now ', 'jtimestamptz') AS padded_now,
+       pg_input_is_valid('- infinity', 'jtimestamptz') AS space_inside,
+       pg_input_is_valid('  ', 'jtimestamptz') AS whitespace_only,
+       pg_input_is_valid(' allballs ', 'jtimestamptz') AS padded_allballs;
+ padded_epoch | padded_minus_infinity | padded_now | space_inside | whitespace_only | padded_allballs 
+--------------+-----------------------+------------+--------------+-----------------+-----------------
+ t            | t                     | t          | f            | f               | f
+(1 row)
+
+SELECT s, (pg_input_error_info(s, 'jtimestamptz')).sql_error_code AS sqlstate
+FROM (VALUES ('- infinity'), ('  '), (' now today '), (' epoch +03:30 ')) v(s);
+       s        | sqlstate 
+----------------+----------
+ - infinity     | 22007
+                | 22007
+  now today     | 22007
+  epoch +03:30  | 22007
+(4 rows)
 
 SELECT pg_input_is_valid('{"1403-01-01 12:00+03:30","1403-12-29 23:59:59Z"}', 'jtimestamptz[]') AS good_array,
        pg_input_is_valid('{"1403-01-01 12:00+03:30","1403-01-01 25:00"}', 'jtimestamptz[]') AS bad_element,

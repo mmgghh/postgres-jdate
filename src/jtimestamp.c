@@ -20,6 +20,7 @@
 #include "libpq/pqformat.h"
 #include "miscadmin.h"		/* USE_ISO_DATES */
 #include "nodes/miscnodes.h"	/* soft errors (ereturn): PostgreSQL 16+ */
+#include "parser/scansup.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
@@ -32,23 +33,42 @@
 
 /*
  * The words core's timestamp_in turns into a special value that we accept
- * without a Jalali date. Matched exactly (whole string, case-insensitive), so
- * that no Gregorian spelling gets through to core. "allballs" is not here: it
- * is a time-only word that core rejects for timestamp.
+ * without a Jalali date. Matched exactly (the whole string apart from
+ * surrounding whitespace, case-insensitive), so that no Gregorian spelling gets
+ * through to core. "allballs" is not here: it is a time-only word that core
+ * rejects for timestamp.
  */
 static const char *const jtimestamp_special_words[] = {
 	"infinity", "-infinity", "now", "today", "tomorrow", "yesterday", "epoch"
 };
 
-static bool
-jtimestamp_is_special_word(const char *str)
+/*
+ * If str is one of the special words, possibly with whitespace before and after
+ * it (as core accepts, and as jdate_in accepts around a date), return the word
+ * alone in a palloc'd string; otherwise NULL. Whitespace inside the word (a
+ * space after the minus sign) is not accepted. The caller hands the trimmed
+ * word to core, so what core does with whitespace does not matter here.
+ */
+static char *
+jtimestamp_special_word(const char *str)
 {
+	const char *start = str;
+	const char *stop = str + strlen(str);
+
+	while (scanner_isspace(*start))
+		start++;
+	while (stop > start && scanner_isspace(stop[-1]))
+		stop--;
+
 	for (size_t i = 0; i < lengthof(jtimestamp_special_words); i++)
 	{
-		if (pg_strcasecmp(str, jtimestamp_special_words[i]) == 0)
-			return true;
+		const char *word = jtimestamp_special_words[i];
+
+		if (strlen(word) == (size_t) (stop - start) &&
+			pg_strncasecmp(start, word, stop - start) == 0)
+			return pnstrdup(start, stop - start);
 	}
-	return false;
+	return NULL;
 }
 
 /*
@@ -158,14 +178,14 @@ jtimestamp_input(PGFunction core_in, const char *typname, char *str,
 
 		case JDATE_PARSE_SYNTAX:
 		default:
-			if (!jtimestamp_is_special_word(str))
+			core_str = jtimestamp_special_word(str);
+			if (core_str == NULL)
 			{
 				errsave(escontext,
 						(errcode(ERRCODE_INVALID_DATETIME_FORMAT),
 						 errmsg("invalid input syntax for type %s: \"%s\"", typname, str)));
 				return false;
 			}
-			core_str = str;
 			break;
 	}
 

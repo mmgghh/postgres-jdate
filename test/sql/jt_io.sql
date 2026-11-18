@@ -68,6 +68,27 @@ SELECT 'now'::jtimestamp::text = jdate_format(now(), true) AS now_matches_in_kir
 SELECT 'today'::jtimestamp::text = jdate_format(now(), false) || ' 00:00:00' AS today_matches_in_kiritimati;
 SET timezone = 'UTC';
 
+-- whitespace before and after a special word is accepted, as it is around a date,
+-- and the value is the one without it. Space, tab, newline and carriage return
+-- count as whitespace.
+SELECT ' infinity'::jtimestamp, 'infinity '::jtimestamp, '  -infinity  '::jtimestamp;
+SELECT E'\t-INFINITY\n'::jtimestamp, E'\r\n Infinity \t'::jtimestamp;
+SELECT ' epoch'::jtimestamp, 'epoch '::jtimestamp, E'\n epoch\t '::jtimestamp;
+SELECT ' infinity '::jtimestamp(0), ' epoch '::jtimestamp(3);
+SELECT ' now'::jtimestamp = 'now'::jtimestamp AS now_leading,
+       'now '::jtimestamp = 'now'::jtimestamp AS now_trailing,
+       E'\t NOW\n'::jtimestamp = 'now'::jtimestamp AS now_both;
+SELECT ' today'::jtimestamp = 'today'::jtimestamp AS today_leading,
+       'tomorrow  '::jtimestamp = 'tomorrow'::jtimestamp AS tomorrow_trailing,
+       ' yesterday '::jtimestamp = 'yesterday'::jtimestamp AS yesterday_both;
+SELECT ' today '::jtimestamp::text = jdate_format(now(), false) || ' 00:00:00' AS today_padded_matches;
+-- in an array literal (a quoted element keeps its whitespace) and in a column
+SELECT '{" epoch ","infinity ", " -infinity"}'::jtimestamp[] AS padded_array;
+CREATE TEMP TABLE jt_io_pad (t jtimestamp);
+INSERT INTO jt_io_pad VALUES (' infinity '), (' -infinity'), ('epoch  ');
+SELECT t FROM jt_io_pad ORDER BY t;
+DROP TABLE jt_io_pad;
+
 -- ---------------------------------------------------------------------
 -- errors
 -- ---------------------------------------------------------------------
@@ -79,9 +100,17 @@ SELECT '20240320'::jtimestamp;
 SELECT '12:00:00'::jtimestamp;
 SELECT 'garbage'::jtimestamp;
 SELECT ''::jtimestamp;
-SELECT ' now'::jtimestamp;                     -- the words are matched exactly
-SELECT 'now '::jtimestamp;
-SELECT 'nowhere'::jtimestamp;
+SELECT 'nowhere'::jtimestamp;                  -- the words are matched exactly
+SELECT 'now today'::jtimestamp;                -- two words
+SELECT '- infinity'::jtimestamp;               -- no space inside a word
+SELECT 'in finity'::jtimestamp;
+SELECT '  '::jtimestamp;                       -- only whitespace
+SELECT E'\t\n'::jtimestamp;
+SELECT 'infinity 1403-01-01'::jtimestamp;      -- a word and then a date, or a time
+SELECT 'epoch 12:00'::jtimestamp;
+SELECT ' now 12:00 '::jtimestamp;
+SELECT ' allballs '::jtimestamp;               -- whitespace does not widen the list
+SELECT ' March 20, 2024 12:00 '::jtimestamp;
 SELECT '1403-05'::jtimestamp;
 SELECT '1403/05/15 12:00'::jtimestamp;
 -- 22007: a date and then junk, a second date field
@@ -128,6 +157,14 @@ SELECT s, (pg_input_error_info(s, 'jtimestamp')).sql_error_code AS sqlstate
 FROM (VALUES ('garbage'), ('1403-05-15 12:00 1403-05-16'), ('1403-13-01 12:00'),
              ('1403-01-01 25:00'), ('3178-01-01 00:00'), ('1403-01-01 12:00 BC'),
              ('1403-01-01 12:00 Nowhere/Zone'), ('1403-01-01 12:00 +17:00')) v(s);
+SELECT pg_input_is_valid(' epoch ', 'jtimestamp') AS padded_epoch,
+       pg_input_is_valid(E'\t-infinity\n', 'jtimestamp') AS padded_minus_infinity,
+       pg_input_is_valid(' now ', 'jtimestamp') AS padded_now,
+       pg_input_is_valid('- infinity', 'jtimestamp') AS space_inside,
+       pg_input_is_valid('  ', 'jtimestamp') AS whitespace_only,
+       pg_input_is_valid(' allballs ', 'jtimestamp') AS padded_allballs;
+SELECT s, (pg_input_error_info(s, 'jtimestamp')).sql_error_code AS sqlstate
+FROM (VALUES ('- infinity'), ('  '), (' now today '), (' epoch 1403-01-01 ')) v(s);
 SELECT pg_input_is_valid('{"1403-01-01 12:00","1403-12-29 23:59:59"}', 'jtimestamp[]') AS good_array,
        pg_input_is_valid('{"1403-01-01 12:00","1403-01-01 25:00"}', 'jtimestamp[]') AS bad_element,
        pg_input_is_valid('{"1403-01-01 12:00","3178-01-01 00:00"}', 'jtimestamp[]') AS range_element;
@@ -435,6 +472,29 @@ SELECT 'today'::jtimestamptz::text = jdate_format(now(), false) || ' 00:00:00+14
 SELECT left('now'::jtimestamptz::text, 10) = jdate_format(now(), false) AS now_date_matches_in_kiritimati;
 SET timezone = 'UTC';
 
+-- whitespace before and after a special word is accepted, and the value is the
+-- one without it (see the jtimestamp section)
+SELECT ' infinity'::jtimestamptz, 'infinity '::jtimestamptz, '  -infinity  '::jtimestamptz;
+SELECT E'\t-INFINITY\n'::jtimestamptz, E'\r\n Infinity \t'::jtimestamptz;
+SELECT ' epoch'::jtimestamptz AS epoch_leading, 'epoch '::jtimestamptz AS epoch_trailing,
+       E'\n epoch\t '::jtimestamptz AS epoch_both;
+SET timezone = 'Asia/Tehran';
+SELECT ' epoch '::jtimestamptz AS epoch_both_tehran;
+SET timezone = 'UTC';
+SELECT ' infinity '::jtimestamptz(0), ' epoch '::jtimestamptz(3);
+SELECT ' now'::jtimestamptz = 'now'::jtimestamptz AS now_leading,
+       'now '::jtimestamptz = 'now'::jtimestamptz AS now_trailing,
+       E'\t NOW\n'::jtimestamptz = 'now'::jtimestamptz AS now_both;
+SELECT ' today'::jtimestamptz = 'today'::jtimestamptz AS today_leading,
+       'tomorrow  '::jtimestamptz = 'tomorrow'::jtimestamptz AS tomorrow_trailing,
+       ' yesterday '::jtimestamptz = 'yesterday'::jtimestamptz AS yesterday_both;
+SELECT ' today '::jtimestamptz::text = jdate_format(now(), false) || ' 00:00:00+00' AS today_padded_matches;
+SELECT '{" epoch ","infinity ", " -infinity"}'::jtimestamptz[] AS padded_array;
+CREATE TEMP TABLE jt_io_tzpad (t jtimestamptz);
+INSERT INTO jt_io_tzpad VALUES (' infinity '), (' -infinity'), ('epoch  ');
+SELECT t FROM jt_io_tzpad ORDER BY t;
+DROP TABLE jt_io_tzpad;
+
 -- ---------------------------------------------------------------------
 -- errors
 -- ---------------------------------------------------------------------
@@ -446,9 +506,18 @@ SELECT '20240320'::jtimestamptz;
 SELECT '12:00:00+03:30'::jtimestamptz;
 SELECT 'garbage'::jtimestamptz;
 SELECT ''::jtimestamptz;
-SELECT ' now'::jtimestamptz;
-SELECT 'now '::jtimestamptz;
-SELECT 'nowhere'::jtimestamptz;
+SELECT 'nowhere'::jtimestamptz;                -- the words are matched exactly
+SELECT 'now today'::jtimestamptz;              -- two words
+SELECT '- infinity'::jtimestamptz;             -- no space inside a word
+SELECT 'in finity'::jtimestamptz;
+SELECT '  '::jtimestamptz;                     -- only whitespace
+SELECT E'\t\n'::jtimestamptz;
+SELECT 'infinity 1403-01-01'::jtimestamptz;    -- a word and then a date, a time or a zone
+SELECT 'epoch 12:00+00'::jtimestamptz;
+SELECT 'epoch +03:30'::jtimestamptz;
+SELECT ' now 12:00 '::jtimestamptz;
+SELECT ' allballs '::jtimestamptz;             -- whitespace does not widen the list
+SELECT ' March 20, 2024 12:00+00 '::jtimestamptz;
 SELECT '1403-05'::jtimestamptz;
 SELECT '1403-05-15x'::jtimestamptz;
 SELECT '1403-05-15 12:00+00 1403-05-16'::jtimestamptz;
@@ -496,6 +565,14 @@ FROM (VALUES ('garbage'), ('1403-05-15 12:00+00 1403-05-16'), ('1403-13-01 12:00
              ('1403-01-01 25:00'), ('3178-01-01 00:00+00'), ('-0061-01-01 15:59:59.999999+00'),
              ('1403-01-01 12:00 BC'), ('1403-01-01 12:00 Nowhere/Zone'),
              ('1403-01-01 12:00+16:00'), ('1403-01-01 12:00+15:59:59')) v(s);
+SELECT pg_input_is_valid(' epoch ', 'jtimestamptz') AS padded_epoch,
+       pg_input_is_valid(E'\t-infinity\n', 'jtimestamptz') AS padded_minus_infinity,
+       pg_input_is_valid(' now ', 'jtimestamptz') AS padded_now,
+       pg_input_is_valid('- infinity', 'jtimestamptz') AS space_inside,
+       pg_input_is_valid('  ', 'jtimestamptz') AS whitespace_only,
+       pg_input_is_valid(' allballs ', 'jtimestamptz') AS padded_allballs;
+SELECT s, (pg_input_error_info(s, 'jtimestamptz')).sql_error_code AS sqlstate
+FROM (VALUES ('- infinity'), ('  '), (' now today '), (' epoch +03:30 ')) v(s);
 SELECT pg_input_is_valid('{"1403-01-01 12:00+03:30","1403-12-29 23:59:59Z"}', 'jtimestamptz[]') AS good_array,
        pg_input_is_valid('{"1403-01-01 12:00+03:30","1403-01-01 25:00"}', 'jtimestamptz[]') AS bad_element,
        pg_input_is_valid('{"1403-01-01 12:00+03:30","3178-01-01 00:00+00"}', 'jtimestamptz[]') AS range_element;

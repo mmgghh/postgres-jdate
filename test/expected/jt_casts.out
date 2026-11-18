@@ -64,6 +64,102 @@ ORDER BY p.proname;
 (2 rows)
 
 -- ---------------------------------------------------------------------
+-- volatility of every cast function, against core's
+-- ---------------------------------------------------------------------
+-- A cast that reads the session time zone is STABLE, every other one is
+-- IMMUTABLE. The oracle is core: each of our types is mapped to the core type
+-- it mirrors (jdate to date, jtimestamp to timestamp, jtimestamptz to
+-- timestamptz) and the core cast between the mapped types gives the volatility
+-- expected. Where the mapping leaves one type (date -> jdate, timestamp ->
+-- jtimestamp, timestamptz -> jtimestamptz) there is no core cast: the function
+-- is a range check and reads no zone, so IMMUTABLE is expected (this includes
+-- timestamptz -> jtimestamptz, unlike core's STABLE timestamp -> timestamptz).
+-- The scale casts map to core's scale casts, which are IMMUTABLE.
+WITH m(ours, core) AS (
+  VALUES ('jdate'::regtype, 'date'::regtype),
+         ('jtimestamp'::regtype, 'timestamp'::regtype),
+         ('jtimestamptz'::regtype, 'timestamptz'::regtype)
+)
+SELECT c.castsource::regtype AS source, c.casttarget::regtype AS target,
+       p.proname AS function, p.provolatile AS volatility,
+       coalesce(cp.provolatile, 'i') AS expected,
+       p.provolatile = coalesce(cp.provolatile, 'i') AS as_expected
+FROM pg_cast c
+JOIN pg_proc p ON p.oid = c.castfunc
+LEFT JOIN m ms ON ms.ours = c.castsource
+LEFT JOIN m mt ON mt.ours = c.casttarget
+LEFT JOIN pg_cast cc ON cc.castsource = coalesce(ms.core, c.castsource)
+                    AND cc.casttarget = coalesce(mt.core, c.casttarget)
+LEFT JOIN pg_proc cp ON cp.oid = cc.castfunc
+WHERE ms.ours IS NOT NULL OR mt.ours IS NOT NULL
+ORDER BY c.castsource::regtype::text COLLATE "C", c.casttarget::regtype::text COLLATE "C";
+           source            |           target            |   function   | volatility | expected | as_expected 
+-----------------------------+-----------------------------+--------------+------------+----------+-------------
+ date                        | jdate                       | jdate        | i          | i        | t
+ date                        | jtimestamp                  | jtimestamp   | i          | i        | t
+ date                        | jtimestamptz                | jtimestamptz | s          | s        | t
+ jdate                       | jtimestamp                  | jtimestamp   | i          | i        | t
+ jdate                       | jtimestamptz                | jtimestamptz | s          | s        | t
+ jdate                       | timestamp with time zone    | timestamptz  | s          | s        | t
+ jdate                       | timestamp without time zone | timestamp    | i          | i        | t
+ jtimestamp                  | jdate                       | jdate        | i          | i        | t
+ jtimestamp                  | jtimestamp                  | jtimestamp   | i          | i        | t
+ jtimestamp                  | jtimestamptz                | jtimestamptz | s          | s        | t
+ jtimestamptz                | jdate                       | jdate        | s          | s        | t
+ jtimestamptz                | jtimestamp                  | jtimestamp   | s          | s        | t
+ jtimestamptz                | jtimestamptz                | jtimestamptz | i          | i        | t
+ timestamp with time zone    | jdate                       | jdate        | s          | s        | t
+ timestamp with time zone    | jtimestamptz                | jtimestamptz | i          | i        | t
+ timestamp without time zone | jdate                       | jdate        | i          | i        | t
+ timestamp without time zone | jtimestamp                  | jtimestamp   | i          | i        | t
+(17 rows)
+
+-- the cast functions of the three types together: how many, and none that
+-- differs from core's volatility
+WITH m(ours, core) AS (
+  VALUES ('jdate'::regtype, 'date'::regtype),
+         ('jtimestamp'::regtype, 'timestamp'::regtype),
+         ('jtimestamptz'::regtype, 'timestamptz'::regtype)
+)
+SELECT count(*) AS cast_functions,
+       count(*) FILTER (WHERE p.provolatile = 's') AS stable,
+       count(*) FILTER (WHERE p.provolatile = 'i') AS immutable,
+       count(*) FILTER (WHERE p.provolatile = 'v') AS volatile,
+       count(*) FILTER (WHERE p.provolatile <> coalesce(cp.provolatile, 'i')) AS differing_from_core
+FROM pg_cast c
+JOIN pg_proc p ON p.oid = c.castfunc
+LEFT JOIN m ms ON ms.ours = c.castsource
+LEFT JOIN m mt ON mt.ours = c.casttarget
+LEFT JOIN pg_cast cc ON cc.castsource = coalesce(ms.core, c.castsource)
+                    AND cc.casttarget = coalesce(mt.core, c.casttarget)
+LEFT JOIN pg_proc cp ON cp.oid = cc.castfunc
+WHERE ms.ours IS NOT NULL OR mt.ours IS NOT NULL;
+ cast_functions | stable | immutable | volatile | differing_from_core 
+----------------+--------+-----------+----------+---------------------
+             17 |      7 |        10 |        0 |                   0
+(1 row)
+
+-- the functions next to the casts that convert but are not casts: the epoch
+-- conversions read no zone (to_jdate with a zone name takes the zone as an
+-- argument, as core's timezone(text, timestamptz)), jdate_format on a
+-- timestamptz reads the session zone
+SELECT p.proname AS function, pg_get_function_identity_arguments(p.oid) AS args,
+       p.provolatile AS volatility
+FROM pg_proc p
+WHERE p.proname IN ('to_jdate', 'to_jtimestamptz', 'jdate_format')
+  AND p.oid IN (SELECT d.objid FROM pg_depend d
+                WHERE d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
+                  AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'jdate'))
+ORDER BY p.proname, pg_get_function_identity_arguments(p.oid) COLLATE "C";
+    function     |                    args                     | volatility 
+-----------------+---------------------------------------------+------------
+ jdate_format    | timestamp with time zone, with_time boolean | s
+ to_jdate        | double precision                            | i
+ to_jdate        | double precision, text                      | i
+ to_jtimestamptz | double precision                            | i
+(4 rows)
+
+-- ---------------------------------------------------------------------
 -- Nowruz 1403 (1403-01-01 is 2024-03-20) in five zones
 --
 -- Every row is evaluated in its zone, with a fresh parse per statement (a

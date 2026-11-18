@@ -130,6 +130,10 @@ FROM (VALUES
   ('in',            $$SELECT ('infinity'::jtimestamp) IS NOT NULL$$),
   ('in, negative',  $$SELECT ('-infinity'::jtimestamp) IS NOT NULL$$),
   ('in, typmod (0)', $$SELECT ('infinity'::jtimestamp(0)) IS NOT NULL$$),
+  ('in, padded',    $$SELECT (E'\t infinity \n'::jtimestamp) IS NOT NULL$$),
+  ('in, padded, negative', $$SELECT ('  -infinity '::jtimestamp) IS NOT NULL$$),
+  ('in, padded, typmod (0)', $$SELECT (' infinity '::jtimestamp(0)) IS NOT NULL$$),
+  ('in, padded epoch', $$SELECT (' epoch '::jtimestamp) IS NOT NULL$$),
   ('from timestamp', $$SELECT ('infinity'::timestamp::jtimestamp) IS NOT NULL$$),
   ('from timestamp, negative', $$SELECT ('-infinity'::timestamp::jtimestamp) IS NOT NULL$$),
   ('from date',     $$SELECT ('infinity'::date::jtimestamp) IS NOT NULL$$),
@@ -313,6 +317,10 @@ FROM (VALUES
   ('in',            $$SELECT ('infinity'::jtimestamptz) IS NOT NULL$$),
   ('in, negative',  $$SELECT ('-infinity'::jtimestamptz) IS NOT NULL$$),
   ('in, typmod (0)', $$SELECT ('infinity'::jtimestamptz(0)) IS NOT NULL$$),
+  ('in, padded',    $$SELECT (E'\t infinity \n'::jtimestamptz) IS NOT NULL$$),
+  ('in, padded, negative', $$SELECT ('  -infinity '::jtimestamptz) IS NOT NULL$$),
+  ('in, padded, typmod (0)', $$SELECT (' infinity '::jtimestamptz(0)) IS NOT NULL$$),
+  ('in, padded epoch', $$SELECT (' epoch '::jtimestamptz) IS NOT NULL$$),
   ('from timestamptz', $$SELECT ('infinity'::timestamptz::jtimestamptz) IS NOT NULL$$),
   ('from timestamptz, negative', $$SELECT ('-infinity'::timestamptz::jtimestamptz) IS NOT NULL$$),
   ('from jtimestamp', $$SELECT ('infinity'::jtimestamp::jtimestamptz) IS NOT NULL$$),
@@ -350,7 +358,7 @@ SELECT count(*) AS cases,
 FROM bcase;
  cases | zones | runs 
 -------+-------+------
-   132 |     6 |  792
+   140 |     6 |  840
 (1 row)
 
 SELECT count(*) FILTER (WHERE got = 't') > 0 AS has_success,
@@ -412,79 +420,87 @@ ORDER BY c.n;
   34 | ts  | infinity: in                                                   | tttttt | t
   35 | ts  | infinity: in, negative                                         | tttttt | t
   36 | ts  | infinity: in, typmod (0)                                       | tttttt | t
-  37 | ts  | infinity: from timestamp                                       | tttttt | t
-  38 | ts  | infinity: from timestamp, negative                             | tttttt | t
-  39 | ts  | infinity: from date                                            | tttttt | t
-  40 | ts  | infinity: from date, negative                                  | tttttt | t
-  41 | ts  | infinity: from jdate                                           | tttttt | t
-  42 | ts  | infinity: from jdate, negative                                 | tttttt | t
-  43 | ts  | infinity: from jtimestamptz                                    | tttttt | t
-  44 | ts  | infinity: from jtimestamptz, negative                          | tttttt | t
-  45 | ts  | jtimestamptz -> jtimestamp, first valid instant                | tttttt | t
-  46 | ts  | jtimestamptz -> jtimestamp, last valid instant                 | tttttt | t
-  47 | tz  | in: first valid instant, +00                                   | tttttt | t
-  48 | tz  | in: 1 us below it, +00                                         | EEEEEE | t
-  49 | tz  | in: start of the first day, +00                                | EEEEEE | t
-  50 | tz  | in: last valid instant, +00                                    | tttttt | t
-  51 | tz  | in: 1 us above it, +00                                         | EEEEEE | t
-  52 | tz  | in: end of the last day, +00                                   | EEEEEE | t
-  53 | tz  | in: first valid instant, +03:30                                | tttttt | t
-  54 | tz  | in: 1 us below it, +03:30                                      | EEEEEE | t
-  55 | tz  | in: last valid instant, +03:30                                 | tttttt | t
-  56 | tz  | in: 1 us above it, +03:30                                      | EEEEEE | t
-  57 | tz  | in: first valid instant, +15:59:59                             | tttttt | t
-  58 | tz  | in: 1 us below it, +15:59:59                                   | EEEEEE | t
-  59 | tz  | in: last valid instant, -15:59:59                              | tttttt | t
-  60 | tz  | in: 1 us above it, -15:59:59                                   | EEEEEE | t
-  61 | tz  | in: first valid instant, -05                                   | tttttt | t
-  62 | tz  | in: 1 us below it, -05                                         | EEEEEE | t
-  63 | tz  | in: last valid instant, -05                                    | tttttt | t
-  64 | tz  | in: 1 us above it, -05                                         | EEEEEE | t
-  65 | tz  | in: above the range by date                                    | EEEEEE | t
-  66 | tz  | in: below the range by date                                    | EEEEEE | t
-  67 | tz  | timestamptz -> jtimestamptz, first valid instant               | tttttt | t
-  68 | tz  | timestamptz -> jtimestamptz, 1 us below the first              | EEEEEE | t
-  69 | tz  | timestamptz -> jtimestamptz, last valid instant                | tttttt | t
-  70 | tz  | timestamptz -> jtimestamptz, 1 us above the last               | EEEEEE | t
-  83 | tz  | jtimestamp -> jtimestamptz, start of the first day             | EEEEEE | t
-  84 | tz  | jtimestamp -> jtimestamptz, end of the last day                | EEEEEE | t
-  97 | tz  | typmod (0), last instant, literal                              | EEEEEE | t
-  98 | tz  | typmod (3), last instant, literal                              | EEEEEE | t
-  99 | tz  | typmod (5), last instant, literal                              | EEEEEE | t
- 100 | tz  | typmod (6), last instant, literal (no rounding)                | tttttt | t
- 101 | tz  | typmod (0), last second .4 rounds down                         | tttttt | t
- 102 | tz  | typmod (0), last second .5 rounds up                           | EEEEEE | t
- 103 | tz  | typmod (0), last instant, through a value                      | EEEEEE | t
- 104 | tz  | typmod (0), last instant, from timestamptz                     | EEEEEE | t
- 105 | tz  | typmod (0), first instant (nothing to round)                   | tttttt | t
- 106 | tz  | typmod (0), first instant + .4 (rounds down to the first)      | tttttt | t
- 107 | tz  | typmod (3), first instant, from timestamptz                    | tttttt | t
- 108 | tz  | typmod (0), first instant - .4 s, literal                      | EEEEEE | t
- 109 | tz  | to_jtimestamptz: first valid instant                           | tttttt | t
- 110 | tz  | to_jtimestamptz: 1 s below it                                  | EEEEEE | t
- 111 | tz  | to_jtimestamptz: last whole second                             | tttttt | t
- 112 | tz  | to_jtimestamptz: 1 s above it                                  | EEEEEE | t
- 113 | tz  | to_jtimestamptz: first Jalali day start (below the safe range) | EEEEEE | t
- 114 | tz  | to_jtimestamptz: last Jalali day end (above the safe range)    | EEEEEE | t
- 115 | tz  | to_jtimestamptz: NaN                                           | EEEEEE | t
- 116 | tz  | to_jtimestamptz: infinity is accepted                          | tttttt | t
- 117 | tz  | to_jtimestamptz: -infinity is accepted                         | tttttt | t
- 118 | tz  | infinity: in                                                   | tttttt | t
- 119 | tz  | infinity: in, negative                                         | tttttt | t
- 120 | tz  | infinity: in, typmod (0)                                       | tttttt | t
- 121 | tz  | infinity: from timestamptz                                     | tttttt | t
- 122 | tz  | infinity: from timestamptz, negative                           | tttttt | t
- 123 | tz  | infinity: from jtimestamp                                      | tttttt | t
- 124 | tz  | infinity: from jtimestamp, negative                            | tttttt | t
- 125 | tz  | infinity: from date                                            | tttttt | t
- 126 | tz  | infinity: from date, negative                                  | tttttt | t
- 127 | tz  | infinity: from jdate                                           | tttttt | t
- 128 | tz  | infinity: from jdate, negative                                 | tttttt | t
- 129 | tz  | infinity: to_jtimestamptz                                      | tttttt | t
- 130 | tz  | infinity: to_jtimestamptz, negative                            | tttttt | t
- 131 | tz  | jtimestamptz -> jdate, first valid instant                     | tttttt | t
- 132 | tz  | jtimestamptz -> jdate, last valid instant                      | tttttt | t
-(108 rows)
+  37 | ts  | infinity: in, padded                                           | tttttt | t
+  38 | ts  | infinity: in, padded, negative                                 | tttttt | t
+  39 | ts  | infinity: in, padded, typmod (0)                               | tttttt | t
+  40 | ts  | infinity: in, padded epoch                                     | tttttt | t
+  41 | ts  | infinity: from timestamp                                       | tttttt | t
+  42 | ts  | infinity: from timestamp, negative                             | tttttt | t
+  43 | ts  | infinity: from date                                            | tttttt | t
+  44 | ts  | infinity: from date, negative                                  | tttttt | t
+  45 | ts  | infinity: from jdate                                           | tttttt | t
+  46 | ts  | infinity: from jdate, negative                                 | tttttt | t
+  47 | ts  | infinity: from jtimestamptz                                    | tttttt | t
+  48 | ts  | infinity: from jtimestamptz, negative                          | tttttt | t
+  49 | ts  | jtimestamptz -> jtimestamp, first valid instant                | tttttt | t
+  50 | ts  | jtimestamptz -> jtimestamp, last valid instant                 | tttttt | t
+  51 | tz  | in: first valid instant, +00                                   | tttttt | t
+  52 | tz  | in: 1 us below it, +00                                         | EEEEEE | t
+  53 | tz  | in: start of the first day, +00                                | EEEEEE | t
+  54 | tz  | in: last valid instant, +00                                    | tttttt | t
+  55 | tz  | in: 1 us above it, +00                                         | EEEEEE | t
+  56 | tz  | in: end of the last day, +00                                   | EEEEEE | t
+  57 | tz  | in: first valid instant, +03:30                                | tttttt | t
+  58 | tz  | in: 1 us below it, +03:30                                      | EEEEEE | t
+  59 | tz  | in: last valid instant, +03:30                                 | tttttt | t
+  60 | tz  | in: 1 us above it, +03:30                                      | EEEEEE | t
+  61 | tz  | in: first valid instant, +15:59:59                             | tttttt | t
+  62 | tz  | in: 1 us below it, +15:59:59                                   | EEEEEE | t
+  63 | tz  | in: last valid instant, -15:59:59                              | tttttt | t
+  64 | tz  | in: 1 us above it, -15:59:59                                   | EEEEEE | t
+  65 | tz  | in: first valid instant, -05                                   | tttttt | t
+  66 | tz  | in: 1 us below it, -05                                         | EEEEEE | t
+  67 | tz  | in: last valid instant, -05                                    | tttttt | t
+  68 | tz  | in: 1 us above it, -05                                         | EEEEEE | t
+  69 | tz  | in: above the range by date                                    | EEEEEE | t
+  70 | tz  | in: below the range by date                                    | EEEEEE | t
+  71 | tz  | timestamptz -> jtimestamptz, first valid instant               | tttttt | t
+  72 | tz  | timestamptz -> jtimestamptz, 1 us below the first              | EEEEEE | t
+  73 | tz  | timestamptz -> jtimestamptz, last valid instant                | tttttt | t
+  74 | tz  | timestamptz -> jtimestamptz, 1 us above the last               | EEEEEE | t
+  87 | tz  | jtimestamp -> jtimestamptz, start of the first day             | EEEEEE | t
+  88 | tz  | jtimestamp -> jtimestamptz, end of the last day                | EEEEEE | t
+ 101 | tz  | typmod (0), last instant, literal                              | EEEEEE | t
+ 102 | tz  | typmod (3), last instant, literal                              | EEEEEE | t
+ 103 | tz  | typmod (5), last instant, literal                              | EEEEEE | t
+ 104 | tz  | typmod (6), last instant, literal (no rounding)                | tttttt | t
+ 105 | tz  | typmod (0), last second .4 rounds down                         | tttttt | t
+ 106 | tz  | typmod (0), last second .5 rounds up                           | EEEEEE | t
+ 107 | tz  | typmod (0), last instant, through a value                      | EEEEEE | t
+ 108 | tz  | typmod (0), last instant, from timestamptz                     | EEEEEE | t
+ 109 | tz  | typmod (0), first instant (nothing to round)                   | tttttt | t
+ 110 | tz  | typmod (0), first instant + .4 (rounds down to the first)      | tttttt | t
+ 111 | tz  | typmod (3), first instant, from timestamptz                    | tttttt | t
+ 112 | tz  | typmod (0), first instant - .4 s, literal                      | EEEEEE | t
+ 113 | tz  | to_jtimestamptz: first valid instant                           | tttttt | t
+ 114 | tz  | to_jtimestamptz: 1 s below it                                  | EEEEEE | t
+ 115 | tz  | to_jtimestamptz: last whole second                             | tttttt | t
+ 116 | tz  | to_jtimestamptz: 1 s above it                                  | EEEEEE | t
+ 117 | tz  | to_jtimestamptz: first Jalali day start (below the safe range) | EEEEEE | t
+ 118 | tz  | to_jtimestamptz: last Jalali day end (above the safe range)    | EEEEEE | t
+ 119 | tz  | to_jtimestamptz: NaN                                           | EEEEEE | t
+ 120 | tz  | to_jtimestamptz: infinity is accepted                          | tttttt | t
+ 121 | tz  | to_jtimestamptz: -infinity is accepted                         | tttttt | t
+ 122 | tz  | infinity: in                                                   | tttttt | t
+ 123 | tz  | infinity: in, negative                                         | tttttt | t
+ 124 | tz  | infinity: in, typmod (0)                                       | tttttt | t
+ 125 | tz  | infinity: in, padded                                           | tttttt | t
+ 126 | tz  | infinity: in, padded, negative                                 | tttttt | t
+ 127 | tz  | infinity: in, padded, typmod (0)                               | tttttt | t
+ 128 | tz  | infinity: in, padded epoch                                     | tttttt | t
+ 129 | tz  | infinity: from timestamptz                                     | tttttt | t
+ 130 | tz  | infinity: from timestamptz, negative                           | tttttt | t
+ 131 | tz  | infinity: from jtimestamp                                      | tttttt | t
+ 132 | tz  | infinity: from jtimestamp, negative                            | tttttt | t
+ 133 | tz  | infinity: from date                                            | tttttt | t
+ 134 | tz  | infinity: from date, negative                                  | tttttt | t
+ 135 | tz  | infinity: from jdate                                           | tttttt | t
+ 136 | tz  | infinity: from jdate, negative                                 | tttttt | t
+ 137 | tz  | infinity: to_jtimestamptz                                      | tttttt | t
+ 138 | tz  | infinity: to_jtimestamptz, negative                            | tttttt | t
+ 139 | tz  | jtimestamptz -> jdate, first valid instant                     | tttttt | t
+ 140 | tz  | jtimestamptz -> jdate, last valid instant                      | tttttt | t
+(116 rows)
 
 -- cases that depend on the zone: only whether the result is what core's
 -- arithmetic in that zone predicts, in each of the six zones
@@ -494,32 +510,32 @@ FROM bcase c JOIN bres r USING (n)
 WHERE NOT c.show
 GROUP BY c.n, c.grp, c.label
 ORDER BY c.n;
- n  | grp |                                label                                | as_expected 
-----+-----+---------------------------------------------------------------------+-------------
- 71 | tz  | in, no offset: local clock of the first valid instant               | t
- 72 | tz  | in, no offset: local clock of the 1 us below the first              | t
- 73 | tz  | in, no offset: local clock of the last valid instant                | t
- 74 | tz  | in, no offset: local clock of the 1 us above the last               | t
- 75 | tz  | jtimestamp -> jtimestamptz: local clock of the first valid instant  | t
- 76 | tz  | jtimestamp -> jtimestamptz: local clock of the 1 us below the first | t
- 77 | tz  | jtimestamp -> jtimestamptz: local clock of the last valid instant   | t
- 78 | tz  | jtimestamp -> jtimestamptz: local clock of the 1 us above the last  | t
- 79 | tz  | jtimestamptz(jtimestamp): local clock of the first valid instant    | t
- 80 | tz  | jtimestamptz(jtimestamp): local clock of the 1 us below the first   | t
- 81 | tz  | jtimestamptz(jtimestamp): local clock of the last valid instant     | t
- 82 | tz  | jtimestamptz(jtimestamp): local clock of the 1 us above the last    | t
- 85 | tz  | date -> jtimestamptz, 1 day below the first day                     | t
- 86 | tz  | date -> jtimestamptz, first day                                     | t
- 87 | tz  | date -> jtimestamptz, second day                                    | t
- 88 | tz  | date -> jtimestamptz, third day                                     | t
- 89 | tz  | date -> jtimestamptz, day before the last                           | t
- 90 | tz  | date -> jtimestamptz, last day                                      | t
- 91 | tz  | date -> jtimestamptz, 1 day above the last day                      | t
- 92 | tz  | jdate -> jtimestamptz, first day                                    | t
- 93 | tz  | jdate -> jtimestamptz, second day                                   | t
- 94 | tz  | jdate -> jtimestamptz, third day                                    | t
- 95 | tz  | jdate -> jtimestamptz, day before the last                          | t
- 96 | tz  | jdate -> jtimestamptz, last day                                     | t
+  n  | grp |                                label                                | as_expected 
+-----+-----+---------------------------------------------------------------------+-------------
+  75 | tz  | in, no offset: local clock of the first valid instant               | t
+  76 | tz  | in, no offset: local clock of the 1 us below the first              | t
+  77 | tz  | in, no offset: local clock of the last valid instant                | t
+  78 | tz  | in, no offset: local clock of the 1 us above the last               | t
+  79 | tz  | jtimestamp -> jtimestamptz: local clock of the first valid instant  | t
+  80 | tz  | jtimestamp -> jtimestamptz: local clock of the 1 us below the first | t
+  81 | tz  | jtimestamp -> jtimestamptz: local clock of the last valid instant   | t
+  82 | tz  | jtimestamp -> jtimestamptz: local clock of the 1 us above the last  | t
+  83 | tz  | jtimestamptz(jtimestamp): local clock of the first valid instant    | t
+  84 | tz  | jtimestamptz(jtimestamp): local clock of the 1 us below the first   | t
+  85 | tz  | jtimestamptz(jtimestamp): local clock of the last valid instant     | t
+  86 | tz  | jtimestamptz(jtimestamp): local clock of the 1 us above the last    | t
+  89 | tz  | date -> jtimestamptz, 1 day below the first day                     | t
+  90 | tz  | date -> jtimestamptz, first day                                     | t
+  91 | tz  | date -> jtimestamptz, second day                                    | t
+  92 | tz  | date -> jtimestamptz, third day                                     | t
+  93 | tz  | date -> jtimestamptz, day before the last                           | t
+  94 | tz  | date -> jtimestamptz, last day                                      | t
+  95 | tz  | date -> jtimestamptz, 1 day above the last day                      | t
+  96 | tz  | jdate -> jtimestamptz, first day                                    | t
+  97 | tz  | jdate -> jtimestamptz, second day                                   | t
+  98 | tz  | jdate -> jtimestamptz, third day                                    | t
+  99 | tz  | jdate -> jtimestamptz, day before the last                          | t
+ 100 | tz  | jdate -> jtimestamptz, last day                                     | t
 (24 rows)
 
 -- Any case that did not give the expected result in some zone (none)
