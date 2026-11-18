@@ -1438,3 +1438,41 @@ CREATE FUNCTION jdate_trunc(text, jtimestamptz) RETURNS jtimestamptz
     AS 'MODULE_PATHNAME', 'jdate_trunc_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
 CREATE FUNCTION jdate_trunc(text, jtimestamptz, text) RETURNS jtimestamptz
     AS 'MODULE_PATHNAME', 'jdate_trunc_jtimestamptz_zone' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- ============================================================
+-- jday_format and jmonth_format
+-- ============================================================
+--
+-- jday_format(x, sep) is the text key YYYY<sep>MM<sep>DD of the Jalali day of x,
+-- and jmonth_format(x, sep) the key YYYY<sep>MM, for x a jdate, a jtimestamp or a
+-- jtimestamptz; the separator defaults to '-' and is any text ('' gives
+-- 14030503). Zero padded, the year on four digits with the sign outside the
+-- padding as jdate_out prints it ('-0061-05-03'). STRICT: a NULL separator gives
+-- NULL. Infinity gives 'infinity' / '-infinity', as jdate_out, for any separator.
+--
+-- jdate and jtimestamp are IMMUTABLE, so jday_format(d) and jmonth_format(d) can
+-- be indexed and used as GROUP BY keys. jtimestamptz is STABLE: the day is the
+-- one on the clock of the session time zone (the same instant 2024-03-19 21:00 UTC
+-- is 1403-01-01 in Asia/Tehran and 1402-12-29 in UTC), so it cannot be indexed;
+-- the recipe is jday_format(ts AT TIME ZONE 'Asia/Tehran'), on the jtimestamp that
+-- AT TIME ZONE returns. There is no explicit-zone variant for that reason.
+--
+-- These are C functions, not SQL wrappers: an SQL function that calls another
+-- function by name fails inside CREATE INDEX (the build runs with a restricted
+-- search_path). A call with a bare literal for the value, such as
+-- jday_format('1403-05-03'), is ambiguous (42725) now that three types offer the
+-- function. The C code is in src/jtimestamp_format.c.
+
+CREATE FUNCTION jday_format(jdate, sep text DEFAULT '-') RETURNS text
+    AS 'MODULE_PATHNAME', 'jday_format_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jday_format(jtimestamp, sep text DEFAULT '-') RETURNS text
+    AS 'MODULE_PATHNAME', 'jday_format_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jday_format(jtimestamptz, sep text DEFAULT '-') RETURNS text
+    AS 'MODULE_PATHNAME', 'jday_format_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION jmonth_format(jdate, sep text DEFAULT '-') RETURNS text
+    AS 'MODULE_PATHNAME', 'jmonth_format_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jmonth_format(jtimestamp, sep text DEFAULT '-') RETURNS text
+    AS 'MODULE_PATHNAME', 'jmonth_format_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jmonth_format(jtimestamptz, sep text DEFAULT '-') RETURNS text
+    AS 'MODULE_PATHNAME', 'jmonth_format_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
