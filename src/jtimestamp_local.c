@@ -146,7 +146,8 @@ jt_local_to_timestamp(const JtLocal *local)
  * A wall time to an instant in a zone (NULL: the session zone). The offset is
  * DetermineTimeZoneOffset's: for a time that does not exist (a gap) it is the
  * offset before the change, which moves the result forward by the length of the
- * gap, and for a time that occurs twice it is the first occurrence's; the same
+ * gap, and for a time that occurs twice it is the later one's (the second
+ * occurrence, the offset after the change); the same
  * choice core makes for timestamptz + interval, date_trunc and timezone().
  */
 TimestampTz

@@ -1,6 +1,10 @@
 -- Interval arithmetic and differences for jtimestamp: jtimestamp + interval,
 -- interval + jtimestamp, jtimestamp - interval, jtimestamp - jtimestamp,
--- jdate - jtimestamp and jtimestamp - jdate. The month part of an interval is
+-- jdate - jtimestamp and jtimestamp - jdate; then the jdate operators with
+-- interval, time and timetz (jdate + interval and jdate - interval, jdate + time,
+-- jdate + timetz and their commutators), which are exactly the ones core has for
+-- date. The jtimestamptz operators and the time zone behaviour are in jt_dst.
+-- The month part of an interval is
 -- applied with Jalali month lengths, then days, then time, as core does for
 -- timestamp; the day and time parts are core's. Results are checked against
 -- hand-computed tables, against an independent SQL model of the month rule over
@@ -410,6 +414,317 @@ SELECT count(*) AS cases,
            pg_temp.val(format($q$SELECT (%L::jtimestamp - %L::jdate)::text$q$, t.j, d.j))
            = pg_temp.val(format($q$SELECT (%L::timestamp - %L::date)::text$q$, t.g, d.g))) AS ts_minus_date_agree
 FROM d, t;
+
+-- ---------------------------------------------------------------------
+-- jdate and interval, time and timetz: the operators core has for date, and no
+-- others. In the catalog, with core's counterpart of each (the same name, date
+-- for jdate, and the timestamp types in the result for the jtimestamp types)
+-- ---------------------------------------------------------------------
+-- all IMMUTABLE (core's date + timetz is too: the zone is in the timetz), STRICT
+-- and PARALLEL SAFE; every + has its commutator, - has none
+SELECT o.oprname AS operator, o.oprleft::regtype AS left_type,
+       o.oprright::regtype AS right_type, o.oprresult::regtype AS result_type,
+       o.oprcode::text AS function, p.provolatile AS volatility,
+       p.proisstrict AS strict, p.proparallel AS parallel,
+       o.oprcom <> 0 AS has_commutator
+FROM pg_operator o JOIN pg_proc p ON p.oid = o.oprcode
+WHERE o.oprname IN ('+', '-')
+  AND ((o.oprleft = 'jdate'::regtype AND o.oprright IN ('interval'::regtype, 'time'::regtype, 'timetz'::regtype))
+    OR (o.oprright = 'jdate'::regtype AND o.oprleft IN ('interval'::regtype, 'time'::regtype, 'timetz'::regtype)))
+ORDER BY o.oprname COLLATE "C", o.oprleft::regtype::text COLLATE "C",
+         o.oprright::regtype::text COLLATE "C";
+
+-- every one of them has a core counterpart with the same volatility, the mirrored
+-- result type and a commutator exactly where core has one; and core has no such
+-- operator that we lack (7 each way)
+SELECT count(*) AS operators,
+       count(c.oid) AS with_core_counterpart,
+       count(*) FILTER (WHERE c.oprresult = CASE o.oprresult
+                                             WHEN 'jtimestamp'::regtype THEN 'timestamp'::regtype
+                                             WHEN 'jtimestamptz'::regtype THEN 'timestamptz'::regtype END) AS same_result,
+       count(*) FILTER (WHERE pc.provolatile = p.provolatile) AS same_volatility,
+       count(*) FILTER (WHERE (c.oprcom <> 0) = (o.oprcom <> 0)) AS same_commutator,
+       (SELECT count(*) FROM pg_operator k
+        WHERE k.oprnamespace = 'pg_catalog'::regnamespace AND k.oprname IN ('+', '-')
+          AND ((k.oprleft = 'date'::regtype AND k.oprright IN ('interval'::regtype, 'time'::regtype, 'timetz'::regtype))
+            OR (k.oprright = 'date'::regtype AND k.oprleft IN ('interval'::regtype, 'time'::regtype, 'timetz'::regtype)))) AS core_operators
+FROM pg_operator o JOIN pg_proc p ON p.oid = o.oprcode
+LEFT JOIN pg_operator c ON c.oprnamespace = 'pg_catalog'::regnamespace AND c.oprname = o.oprname
+     AND c.oprleft = CASE WHEN o.oprleft = 'jdate'::regtype THEN 'date'::regtype ELSE o.oprleft END
+     AND c.oprright = CASE WHEN o.oprright = 'jdate'::regtype THEN 'date'::regtype ELSE o.oprright END
+LEFT JOIN pg_proc pc ON pc.oid = c.oprcode
+WHERE o.oprname IN ('+', '-')
+  AND ((o.oprleft = 'jdate'::regtype AND o.oprright IN ('interval'::regtype, 'time'::regtype, 'timetz'::regtype))
+    OR (o.oprright = 'jdate'::regtype AND o.oprleft IN ('interval'::regtype, 'time'::regtype, 'timetz'::regtype)));
+
+SELECT pg_typeof(jdate '1403-05-15' + interval '1 day') AS d_plus_interval,
+       pg_typeof(interval '1 day' + jdate '1403-05-15') AS interval_plus_d,
+       pg_typeof(jdate '1403-05-15' - interval '1 day') AS d_minus_interval,
+       pg_typeof(jdate '1403-05-15' + time '10:00') AS d_plus_time,
+       pg_typeof(time '10:00' + jdate '1403-05-15') AS time_plus_d,
+       pg_typeof(jdate '1403-05-15' + timetz '10:00+01') AS d_plus_timetz,
+       pg_typeof(timetz '10:00+01' + jdate '1403-05-15') AS timetz_plus_d;
+
+-- ---------------------------------------------------------------------
+-- jdate + interval: the day is its midnight, then the jtimestamp rules. Every
+-- form (+, the flipped +, - of the negated interval, and the jtimestamp of the
+-- day plus the interval) gives the expected value
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE jta_dplus (ord serial, d text, step text, expected text);
+INSERT INTO jta_dplus (d, step, expected) VALUES
+('1403-06-31',  '1 month',                 '1403-07-30 00:00:00'),
+('1403-12-30',  '1 year',                  '1404-12-29 00:00:00'),
+('1403-12-30',  '1 year 1 day',            '1405-01-01 00:00:00'),
+('1403-05-15',  '1 day',                   '1403-05-16 00:00:00'),
+('1403-05-15',  '36 hours',                '1403-05-16 12:00:00'),
+('1403-05-15',  '-1 day',                  '1403-05-14 00:00:00'),
+('1403-05-15',  '1 month 1 day 2 hours',   '1403-06-16 02:00:00'),
+('1403-05-15',  '0',                       '1403-05-15 00:00:00'),
+('1403-05-15',  '-3 hours',                '1403-05-14 21:00:00'),
+('0000-01-31',  '-1 month',                '-0001-12-29 00:00:00'),
+('1403-01-30',  '11 months',               '1403-12-30 00:00:00'),
+('1403-07-30',  '-1 month',                '1403-06-30 00:00:00'),
+('1403-07-30',  '1 microsecond',           '1403-07-30 00:00:00.000001'),
+-- the range edges
+('3177-12-29',  '23:59:59.999999',         '3177-12-29 23:59:59.999999'),
+('3177-12-29',  '24 hours',                'ERR 22008'),
+('3177-12-29',  '1 day',                   'ERR 22008'),
+('3177-12-29',  '1 month',                 'ERR 22008'),
+('3177-12-29',  '1 year',                  'ERR 22008'),
+('3177-11-29',  '1 month',                 '3177-12-29 00:00:00'),
+('3177-12-29',  '-12 months',              '3176-12-29 00:00:00'),
+('3177-12-29',  '1 month -40 days',        'ERR 22008'),   -- the month step leaves the range first
+('-0061-01-01', '1 microsecond',           '-0061-01-01 00:00:00.000001'),
+('-0061-01-01', '-1 microsecond',          'ERR 22008'),
+('-0061-01-01', '-1 day',                  'ERR 22008'),
+('-0061-01-01', '-1 month',                'ERR 22008'),
+('-0061-01-02', '-1 day',                  '-0061-01-01 00:00:00'),
+('-0061-02-01', '-1 month',                '-0061-01-01 00:00:00'),
+('1403-05-15',  '-2147483648 months',      'ERR 22008'),
+('1403-05-15',  '2147483647 months',       'ERR 22008'),
+('1403-05-15',  '-2147483648 days',        'ERR 22008'),
+('1403-05-15',  '2147483647 days',         'ERR 22008');
+
+SELECT ord, d, step, expected,
+       pg_temp.val(format($q$SELECT (jdate %L + interval %L)::text$q$, d, step)) AS d_plus_interval,
+       pg_temp.val(format($q$SELECT (jdate %L + interval %L)::text$q$, d, step)) = expected AS plus_ok,
+       pg_temp.val(format($q$SELECT (interval %L + jdate %L)::text$q$, step, d)) = expected AS flipped_ok,
+       pg_temp.val(format($q$SELECT (jdate %L::jtimestamp + interval %L)::text$q$, d, step)) = expected AS via_jtimestamp_ok
+FROM jta_dplus ORDER BY ord;
+
+-- jdate - interval, with the same table read backwards: d - (-step) is d + step
+-- (an interval of -2147483648 months or days cannot be negated: 22008, so the
+-- two extreme rows are skipped here)
+SELECT count(*) AS rows,
+       count(*) FILTER (WHERE pg_temp.val(format($q$SELECT (jdate %L - (-interval %L))::text$q$, d, step)) = expected) AS minus_negated_ok,
+       count(*) FILTER (WHERE pg_temp.val(format($q$SELECT (jdate %L - interval %L)::text$q$, d, step))
+                            = pg_temp.val(format($q$SELECT (jdate %L::jtimestamp - interval %L)::text$q$, d, step))) AS minus_same_as_jtimestamp
+FROM jta_dplus WHERE step NOT IN ('-2147483648 months', '-2147483648 days');
+
+CREATE TEMP TABLE jta_dminus (ord serial, d text, step text, expected text);
+INSERT INTO jta_dminus (d, step, expected) VALUES
+('1403-07-30', '1 month',            '1403-06-30 00:00:00'),
+('1403-05-15', '1 day',              '1403-05-14 00:00:00'),
+('1403-06-31', '-1 month',           '1403-07-30 00:00:00'),
+('1403-05-15', '2 days 3 hours',     '1403-05-12 21:00:00'),
+('1403-01-01', '1 microsecond',      '1402-12-29 23:59:59.999999'),
+('1404-01-01', '1 day',              '1403-12-30 00:00:00'),
+('1403-05-15', '-2147483648 months', 'ERR 22008'),
+('1403-05-15', '-2147483648 days',   'ERR 22008'),
+('1403-05-15', '2147483647 months',  'ERR 22008');
+SELECT ord, d, step, expected,
+       pg_temp.val(format($q$SELECT (jdate %L - interval %L)::text$q$, d, step)) AS d_minus_interval,
+       pg_temp.val(format($q$SELECT (jdate %L - interval %L)::text$q$, d, step)) = expected AS ok
+FROM jta_dminus ORDER BY ord;
+
+-- the day and time parts are core's date + interval: for steps without a month
+-- the result equals core's on the Gregorian day of the same instants (the days of
+-- the whole range, 120 of them, and the two ends), and with a month it equals
+-- the jtimestamp of the day plus the interval; errors on both sides are the same
+-- SQLSTATE (the core result is converted to jtimestamp, which range-checks it)
+CREATE TEMP TABLE jta_dsteps (step text, months boolean);
+INSERT INTO jta_dsteps VALUES ('1 day', false), ('-1 day', false), ('36 hours', false),
+       ('2 days 3 hours', false), ('1 microsecond', false), ('-1 microsecond', false),
+       ('40 days -2 hours', false), ('1 month', true), ('-1 month', true), ('1 year', true),
+       ('1 month 1 day', true), ('-13 months 3 days 2 hours', true);
+SELECT count(*) AS cases,
+       count(*) FILTER (WHERE s.months OR pg_temp.val(format($q$SELECT (%L::date::jdate + interval %L)::text$q$, a.d, s.step))
+                          = pg_temp.val(format($q$SELECT ((%L::date + interval %L)::jtimestamp)::text$q$, a.d, s.step))) AS plus_agree_with_core,
+       count(*) FILTER (WHERE s.months OR pg_temp.val(format($q$SELECT (%L::date::jdate - interval %L)::text$q$, a.d, s.step))
+                          = pg_temp.val(format($q$SELECT ((%L::date - interval %L)::jtimestamp)::text$q$, a.d, s.step))) AS minus_agree_with_core,
+       count(*) FILTER (WHERE NOT s.months OR pg_temp.val(format($q$SELECT (%L::date::jdate + interval %L)::text$q$, a.d, s.step))
+                          = pg_temp.val(format($q$SELECT (%L::date::jdate::jtimestamp + interval %L)::text$q$, a.d, s.step))) AS plus_agree_with_jtimestamp,
+       count(*) FILTER (WHERE pg_temp.val(format($q$SELECT (%L::date::jdate + interval %L)::text$q$, a.d, s.step)) LIKE 'ERR%') > 0 AS some_errors,
+       count(*) FILTER (WHERE pg_temp.val(format($q$SELECT (%L::date::jdate + interval %L)::text$q$, a.d, s.step)) NOT LIKE 'ERR%') > 0 AS some_values
+FROM jta_dates a, jta_dsteps s;
+
+-- negative control: against core's result for a step one microsecond longer, no
+-- value agrees (only the range errors, which are the same for both)
+SELECT count(*) AS cases,
+       count(*) FILTER (WHERE pg_temp.val(format($q$SELECT (%L::date::jdate + interval %L)::text$q$, a.d, s.step)) NOT LIKE 'ERR%'
+                          AND pg_temp.val(format($q$SELECT (%L::date::jdate + interval %L)::text$q$, a.d, s.step))
+                            = pg_temp.val(format($q$SELECT ((%L::date + interval %L + interval '1 microsecond')::jtimestamp)::text$q$, a.d, s.step))) AS agree_with_a_longer_step
+FROM jta_dates a, jta_dsteps s WHERE NOT s.months;
+
+-- infinity: the same value or SQLSTATE as core's date + interval (its result
+-- converted to jtimestamp, to be in the same calendar), for finite and infinite
+-- days and intervals (an infinite interval exists from PostgreSQL 17)
+WITH d(j, g) AS (VALUES ('infinity', 'infinity'), ('-infinity', '-infinity'), ('1403-05-15', '2024-08-05')),
+     i(step) AS (VALUES ('1 day'), ('-5 days 3 hours'), ('infinity'), ('-infinity'), ('0'))
+SELECT count(*) AS cases,
+       count(*) FILTER (WHERE
+           pg_temp.val(format($q$SELECT (%L::jdate + interval %L)::text$q$, d.j, i.step))
+           = pg_temp.val(format($q$SELECT ((%L::date + interval %L)::jtimestamp)::text$q$, d.g, i.step))) AS plus_agree,
+       count(*) FILTER (WHERE
+           pg_temp.val(format($q$SELECT (interval %L + %L::jdate)::text$q$, i.step, d.j))
+           = pg_temp.val(format($q$SELECT ((interval %L + %L::date)::jtimestamp)::text$q$, i.step, d.g))) AS flipped_agree,
+       count(*) FILTER (WHERE
+           pg_temp.val(format($q$SELECT (%L::jdate - interval %L)::text$q$, d.j, i.step))
+           = pg_temp.val(format($q$SELECT ((%L::date - interval %L)::jtimestamp)::text$q$, d.g, i.step))) AS minus_agree
+FROM d, i;
+SELECT 'infinity'::jdate + interval '1 month' AS inf_plus,
+       '-infinity'::jdate - interval '1 year' AS neg_inf_minus,
+       interval '3 days' + 'infinity'::jdate AS flipped;
+
+-- ---------------------------------------------------------------------
+-- jdate + time, time + jdate (a jtimestamp) and jdate + timetz, timetz + jdate (a
+-- jtimestamptz: the instant of that wall time in the timetz's own offset; shown
+-- here in the session zone UTC)
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE jta_dtime (ord serial, d text, t text, expected text);
+INSERT INTO jta_dtime (d, t, expected) VALUES
+('1403-05-15',  '10:30',            '1403-05-15 10:30:00'),
+('1403-05-15',  '00:00',            '1403-05-15 00:00:00'),
+('1403-05-15',  '23:59:59.999999',  '1403-05-15 23:59:59.999999'),
+('1403-05-15',  '24:00',            '1403-05-16 00:00:00'),
+('1403-12-29',  '24:00',            '1403-12-30 00:00:00'),   -- 1403 is leap
+('1404-12-29',  '24:00',            '1405-01-01 00:00:00'),
+('3177-12-29',  '23:59:59.999999',  '3177-12-29 23:59:59.999999'),
+('3177-12-29',  '24:00',            'ERR 22008'),
+('-0061-01-01', '00:00',            '-0061-01-01 00:00:00'),
+('infinity',    '10:30',            'infinity'),
+('-infinity',   '10:30',            '-infinity');
+SELECT ord, d, t, expected,
+       pg_temp.val(format($q$SELECT (jdate %L + time %L)::text$q$, d, t)) AS d_plus_time,
+       pg_temp.val(format($q$SELECT (jdate %L + time %L)::text$q$, d, t)) = expected AS plus_ok,
+       pg_temp.val(format($q$SELECT (time %L + jdate %L)::text$q$, t, d)) = expected AS flipped_ok
+FROM jta_dtime ORDER BY ord;
+
+CREATE TEMP TABLE jta_dtimetz (ord serial, d text, t text, expected text);
+INSERT INTO jta_dtimetz (d, t, expected) VALUES
+('1403-05-15',  '10:30+03:30',            '1403-05-15 07:00:00+00'),
+('1403-05-15',  '00:00+00',               '1403-05-15 00:00:00+00'),
+('1403-05-15',  '23:59:59.999999-15:59',  '1403-05-16 15:58:59.999999+00'),
+('1403-05-15',  '00:00+15:59',            '1403-05-14 08:01:00+00'),
+('1403-05-15',  '24:00+00',               '1403-05-16 00:00:00+00'),
+('1403-05-15',  '12:00-03:30',            '1403-05-15 15:30:00+00'),
+-- the safe range of jtimestamptz: the first valid instant is -0061-01-01 16:00 UTC
+-- and the last 3177-12-29 07:59:59.999999 UTC
+('-0061-01-01', '16:00+00',               '-0061-01-01 16:00:00+00'),
+('-0061-01-01', '15:59:59.999999+00',     'ERR 22008'),
+('-0061-01-01', '00:01-15:59',            '-0061-01-01 16:00:00+00'),
+('-0061-01-01', '00:00:59.999999-15:59',  'ERR 22008'),
+('3177-12-29',  '07:59:59.999999+00',     '3177-12-29 07:59:59.999999+00'),
+('3177-12-29',  '08:00+00',               'ERR 22008'),
+('3177-12-29',  '23:58:59.999999+15:59',  '3177-12-29 07:59:59.999999+00'),
+('3177-12-29',  '23:59+15:59',            'ERR 22008'),
+('infinity',    '10:30+01',               'infinity'),
+('-infinity',   '10:30+01',               '-infinity');
+SELECT ord, d, t, expected,
+       pg_temp.val(format($q$SELECT (jdate %L + timetz %L)::text$q$, d, t)) AS d_plus_timetz,
+       pg_temp.val(format($q$SELECT (jdate %L + timetz %L)::text$q$, d, t)) = expected AS plus_ok,
+       pg_temp.val(format($q$SELECT (timetz %L + jdate %L)::text$q$, t, d)) = expected AS flipped_ok
+FROM jta_dtimetz ORDER BY ord;
+
+-- against core's date + time and date + timetz on the Gregorian day, for the 120
+-- days of the range and a spread of times (the core result goes through the cast
+-- to the jtimestamp type, which range-checks it): the same value or the same
+-- SQLSTATE, in UTC and in a zone with an offset (the timetz carries its own
+-- offset, so only the display of the instant depends on the session zone)
+CREATE TEMP TABLE jta_times (t time, z timetz);
+INSERT INTO jta_times VALUES ('00:00', '00:00+00'), ('10:30:15.5', '10:30+03:30'),
+       ('23:59:59.999999', '23:59:59.999999-15:59'), ('12:00', '12:00+15:59'),
+       ('24:00', '24:00+00'), ('00:00:00.000001', '00:00:00.000001+00'), ('06:45', '06:45-08');
+SELECT count(*) AS cases,
+       count(*) FILTER (WHERE pg_temp.val(format($q$SELECT (%L::date::jdate + %L::time)::text$q$, a.d, x.t))
+                          = pg_temp.val(format($q$SELECT ((%L::date + %L::time)::jtimestamp)::text$q$, a.d, x.t))) AS time_agree,
+       count(*) FILTER (WHERE pg_temp.val(format($q$SELECT (%L::time + %L::date::jdate)::text$q$, x.t, a.d))
+                          = pg_temp.val(format($q$SELECT ((%L::time + %L::date)::jtimestamp)::text$q$, x.t, a.d))) AS time_flipped_agree,
+       count(*) FILTER (WHERE pg_temp.val(format($q$SELECT (%L::date::jdate + %L::timetz)::text$q$, a.d, x.z))
+                          = pg_temp.val(format($q$SELECT ((%L::date + %L::timetz)::jtimestamptz)::text$q$, a.d, x.z))) AS timetz_agree,
+       count(*) FILTER (WHERE pg_temp.val(format($q$SELECT (%L::timetz + %L::date::jdate)::text$q$, x.z, a.d))
+                          = pg_temp.val(format($q$SELECT ((%L::timetz + %L::date)::jtimestamptz)::text$q$, x.z, a.d))) AS timetz_flipped_agree,
+       count(*) FILTER (WHERE pg_temp.val(format($q$SELECT (%L::date::jdate + %L::timetz)::text$q$, a.d, x.z)) LIKE 'ERR%') > 0 AS some_timetz_errors,
+       count(*) FILTER (WHERE pg_temp.val(format($q$SELECT (%L::date::jdate + %L::timetz)::text$q$, a.d, x.z)) NOT LIKE 'ERR%') > 0 AS some_timetz_values
+FROM jta_dates a, jta_times x;
+SET timezone = 'Asia/Tehran';
+SELECT count(*) AS cases,
+       count(*) FILTER (WHERE pg_temp.val(format($q$SELECT (%L::date::jdate + %L::timetz)::text$q$, a.d, x.z))
+                          = pg_temp.val(format($q$SELECT ((%L::date + %L::timetz)::jtimestamptz)::text$q$, a.d, x.z))) AS timetz_agree_in_tehran
+FROM jta_dates a, jta_times x;
+SET timezone = 'UTC';
+
+-- a jtimestamp from jdate + time or + interval does not depend on the session
+-- zone, a jtimestamptz from jdate + timetz is the same instant in every zone
+SELECT (SELECT jdate '1403-05-15' + time '10:30') AS date_time_in_utc,
+       (SELECT jdate '1403-05-15' + interval '1 month 2 hours') AS date_interval_in_utc,
+       (SELECT (jdate '1403-05-15' + timetz '10:30+03:30')::timestamptz AT TIME ZONE 'UTC') AS date_timetz_in_utc;
+SET timezone = 'America/Sao_Paulo';
+SELECT (SELECT jdate '1403-05-15' + time '10:30') AS date_time_in_sao_paulo,
+       (SELECT jdate '1403-05-15' + interval '1 month 2 hours') AS date_interval_in_sao_paulo,
+       (SELECT (jdate '1403-05-15' + timetz '10:30+03:30')::timestamptz AT TIME ZONE 'UTC') AS date_timetz_in_sao_paulo;
+SET timezone = 'UTC';
+
+-- IMMUTABLE: usable in a generated column and an index expression (jdate + timetz
+-- too: core's date + timetz is IMMUTABLE)
+CREATE TABLE jta_dix (
+    id int,
+    d jdate,
+    t time,
+    z timetz,
+    next_month jtimestamp GENERATED ALWAYS AS (d + interval '1 month') STORED,
+    at_time jtimestamp GENERATED ALWAYS AS (d + t) STORED,
+    at_timetz jtimestamptz GENERATED ALWAYS AS (d + z) STORED
+);
+CREATE INDEX jta_dix_prev_day ON jta_dix ((d - interval '1 day'));
+INSERT INTO jta_dix (id, d, t, z) VALUES (1, '1403-06-31', '10:00', '10:00+03:30'),
+                                         (2, '1403-12-30', '24:00', '00:00-01');
+SELECT id, next_month, at_time, at_timetz FROM jta_dix ORDER BY id;
+DROP TABLE jta_dix;
+
+-- ---------------------------------------------------------------------
+-- what resolves without an operator of its own, as in core: a time is converted
+-- to an interval by core's implicit cast, so jtimestamp + time, jtimestamptz +
+-- time and jdate - time use the interval operators (core's timestamp + time and
+-- date - time do the same); timetz has no such cast: no jtimestamp + timetz
+-- ---------------------------------------------------------------------
+SELECT pg_typeof(jtimestamp '1403-05-15 10:00' + time '10:30') AS ts_plus_time,
+       jtimestamp '1403-05-15 10:00' + time '10:30' AS ts_plus_time_value,
+       jtimestamp '1403-05-15 10:00' - time '10:30' AS ts_minus_time_value,
+       pg_typeof(jdate '1403-05-15' - time '10:30') AS date_minus_time,
+       jdate '1403-05-15' - time '10:30' AS date_minus_time_value,
+       jdate '1403-05-15' - time '10:30' = jdate '1403-05-15' - interval '10:30' AS same_as_the_interval;
+SELECT pg_temp.val($$SELECT (jtimestamp '1403-05-15 10:00' + timetz '10:30+01')::text$$) AS ts_plus_timetz,
+       pg_temp.val($$SELECT (timestamp '2024-08-05 10:00' + timetz '10:30+01')::text$$) AS core_ts_plus_timetz,
+       pg_temp.val($$SELECT (jtimestamptz '1403-05-15 10:00+00' + timetz '10:30+01')::text$$) AS tz_plus_timetz,
+       pg_temp.val($$SELECT (timestamptz '2024-08-05 10:00+00' + timetz '10:30+01')::text$$) AS core_tz_plus_timetz,
+       pg_temp.val($$SELECT (time '10:30' - jdate '1403-05-15')::text$$) AS time_minus_date,
+       pg_temp.val($$SELECT (jdate '1403-05-15' + jdate '1403-05-16')::text$$) AS date_plus_date,
+       pg_temp.val($$SELECT (jdate '1403-05-15' - timetz '10:30+01')::text$$) AS date_minus_timetz,
+       pg_temp.val($$SELECT (date '2024-08-05' - timetz '10:30+01')::text$$) AS core_date_minus_timetz;
+
+-- a bare literal next to a jdate with + is ambiguous now (42725), as core's
+-- date + '5' is: write jdate + 5 or jdate + interval '5 days'. With minus the
+-- literal is read as a jdate (the exact match jdate - jdate), 22007, as in core
+SELECT pg_temp.val($$SELECT (jdate '1403-05-15' + '5')::text$$) AS date_plus_bare,
+       pg_temp.val($$SELECT (date '2024-08-05' + '5')::text$$) AS core_date_plus_bare,
+       pg_temp.val($$SELECT ('5' + jdate '1403-05-15')::text$$) AS bare_plus_date,
+       pg_temp.val($$SELECT (jdate '1403-05-15' + '1 day')::text$$) AS date_plus_bare_interval,
+       pg_temp.val($$SELECT (jdate '1403-05-15' - '5')::text$$) AS date_minus_bare,
+       pg_temp.val($$SELECT (date '2024-08-05' - '5')::text$$) AS core_date_minus_bare,
+       (jdate '1403-05-15' + 5)::text AS date_plus_int,
+       (jdate '1403-05-15' + interval '5 days')::text AS date_plus_interval,
+       (jdate '1403-05-15' - 5)::text AS date_minus_int;
 
 -- ---------------------------------------------------------------------
 -- what is not there: no operator against the core types, and nothing between

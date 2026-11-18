@@ -64,8 +64,8 @@ INSERT INTO cases (label, stmt, expected) VALUES
 -- 42883: an operator or function the type does not define
 ('jdate = date',
  $$SELECT jdate '1403-05-15' = date '2024-08-05'$$, '42883'),
-('jdate + interval',
- $$SELECT jdate '1403-05-15' + interval '1 day'$$, '42883'),
+('jdate + jdate',
+ $$SELECT jdate '1403-05-15' + jdate '1403-05-16'$$, '42883'),
 ('jdate + bigint',
  $$SELECT jdate '1403-05-15' + 1::bigint$$, '42883'),
 ('date_part(text, jdate)',
@@ -201,7 +201,7 @@ ORDER BY n;
  jdate_trunc hour                                                            | 0A000    | t
  ALTER EXTENSION SET SCHEMA (not relocatable)                                | 0A000    | t
  jdate = date                                                                | 42883    | t
- jdate + interval                                                            | 42883    | t
+ jdate + jdate                                                               | 42883    | t
  jdate + bigint                                                              | 42883    | t
  date_part(text, jdate)                                                      | 42883    | t
  infinity - jdate                                                            | 22008    | t

@@ -70,8 +70,8 @@ INSERT INTO cases (label, stmt, expected) VALUES
 -- 42883: an operator or function the type does not define
 ('jdate = date',
  $$SELECT jdate '1403-05-15' = date '2024-08-05'$$, '42883'),
-('jdate + interval',
- $$SELECT jdate '1403-05-15' + interval '1 day'$$, '42883'),
+('jdate + jdate',
+ $$SELECT jdate '1403-05-15' + jdate '1403-05-16'$$, '42883'),
 ('jdate + bigint',
  $$SELECT jdate '1403-05-15' + 1::bigint$$, '42883'),
 ('date_part(text, jdate)',

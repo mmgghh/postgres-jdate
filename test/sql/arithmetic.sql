@@ -33,8 +33,10 @@ SELECT (-2147483647 + '-0061-01-01'::jdate) IS NOT NULL AS int_min_past_min;
 SELECT 5 + '3177-12-29'::jdate;
 \set VERBOSITY default
 
--- the operator is a real one, not a shell left over from COMMUTATOR = +, and
--- the two + operators are each other's commutator
+-- the operator is a real one, not a shell left over from COMMUTATOR = + (this
+-- covers every operator of jdate, the interval and time ones of jt_arith too),
+-- and the two integer + operators are each other's commutator (the others are
+-- listed in jt_arith)
 SELECT count(*) AS shell_operators
 FROM pg_operator WHERE oprcode = 0 AND 'jdate'::regtype IN (oprleft, oprright);
 SELECT l.oprleft::regtype AS left_type, l.oprright::regtype AS right_type,
@@ -43,4 +45,5 @@ SELECT l.oprleft::regtype AS left_type, l.oprright::regtype AS right_type,
        c.oprcom = l.oid AS com_points_back
 FROM pg_operator l JOIN pg_operator c ON c.oid = l.oprcom
 WHERE l.oprname = '+' AND 'jdate'::regtype IN (l.oprleft, l.oprright)
+  AND 'integer'::regtype IN (l.oprleft, l.oprright)
 ORDER BY l.oprleft::regtype::text;

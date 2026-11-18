@@ -153,7 +153,7 @@ year), a year outside `-61` to `3177`, and any field that does not fit in a
 | `22023` `invalid_parameter_value` | a unit name core does not recognise: `jdate_part`, `EXTRACT`, `jdate_trunc`; a time zone name core does not recognise: `to_jdate(e, zone)`, even for `±Infinity` and `NaN` | | no |
 | `0A000` `feature_not_supported` | a recognised but unsupported unit (`jdate_part`/`EXTRACT`: `week`, `millennium`, `julian`, `isoyear`, `timezone`, `timezone_hour`, `timezone_minute`; `jdate_trunc`: everything but `year`, `quarter`, `month`, `week`, `day`) | | no |
 | `0A000` | `ALTER EXTENSION jdate SET SCHEMA` | the server | no |
-| `42883` `undefined_function` | an operator or function the type does not define, such as `jdate = date`, `jdate + interval`, `jdate + bigint`, `date_part('year', jdate)` | the server | no |
+| `42883` `undefined_function` | an operator or function the type does not define, such as `jdate = date`, `jdate + jdate`, `jdate + bigint`, `date_part('year', jdate)` | the server | no |
 | `42501` `insufficient_privilege` | `CREATE EXTENSION jdate` by a non-superuser | the server | no |
 
 The `22007`/`22008` split for input and the `22008` paths are asserted by
@@ -229,8 +229,17 @@ and `pg_input_error_info` need PostgreSQL 16, `COPY ... ON_ERROR ignore` needs
 | `+` | `jdate`, `integer` and `integer`, `jdate` | `jdate` | each is the other's commutator; range-checked (`22008`); infinity unchanged |
 | `-` | `jdate`, `integer` | `jdate` | range-checked; infinity unchanged |
 | `-` | `jdate`, `jdate` | `integer` | days between; `22008` if an operand is infinite |
+| `+` | `jdate`, `interval` and `interval`, `jdate` | `jtimestamp` | the day is its midnight, then the `jtimestamp` rules (months are Jalali months, clamped to the last day of a shorter month; then days; then time); `22008` outside the range; `IMMUTABLE` |
+| `-` | `jdate`, `interval` | `jtimestamp` | as above with the negated interval |
+| `+` | `jdate`, `time` and `time`, `jdate` | `jtimestamp` | `time '24:00'` on the last day is `22008` |
+| `+` | `jdate`, `timetz` and `timetz`, `jdate` | `jtimestamptz` | the instant of that wall time in the `timetz`'s own offset; `22008` outside the safe range of `jtimestamptz` |
+| `-` | `jdate`, `jtimestamp` and `jtimestamp`, `jdate` | `interval` | the day is its midnight; days and time of day, never months |
+| `-` | `jdate`, `jtimestamptz` and `jtimestamptz`, `jdate` | `interval` | the day is its midnight in the session zone (`STABLE`) |
 
-Not defined: `jdate ± interval`, `jdate - date`, and comparison with `date`,
+These are the `date` operators with `interval`, `time` and `timetz` that core has, and no others. A bare literal next to a
+`jdate` with `+` is ambiguous (`42725`), as it is for `date`: write `jdate + 5` or `jdate + interval '5 days'`.
+
+Not defined: `jdate - date`, and comparison with `date`,
 `timestamp` or `timestamptz` (`operator does not exist`, because the casts are
 assignment-level, below). A `numeric` or `bigint` day count finds no operator
 either; a `smallint` is promoted to `integer`. `min(jdate)` and `max(jdate)`

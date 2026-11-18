@@ -1158,3 +1158,121 @@ CREATE OPERATOR - (
 CREATE OPERATOR - (
     LEFTARG = jtimestamp, RIGHTARG = jdate, PROCEDURE = jtimestamp_mi_jdate
 );
+
+-- ============================================================
+-- Interval arithmetic for jtimestamptz and jdate, jdate with time
+-- ============================================================
+--
+-- jtimestamptz + interval, interval + jtimestamptz, jtimestamptz - interval
+-- (STABLE: they read the session time zone). As core does for timestamptz,
+-- months and days are applied on the local wall clock of the session zone and
+-- the time part as elapsed time. The month part is applied here with Jalali
+-- month lengths (as for jtimestamp), the instant going to the zone's local
+-- date and time of day and back through core's own zone routines, and core's
+-- timestamptz_pl_interval then does days and time with the month zeroed. So
+-- 2024-03-30 12:00 in Paris + 1 day keeps the wall time and + 24 hours does
+-- not, a wall time that does not exist (a gap) moves forward, and a wall time
+-- that occurs twice takes its second occurrence (the offset after the change),
+-- exactly as in core. The result
+-- is range-checked against the jtimestamptz safe range (22008), and so is the
+-- instant after the month step: a month step that itself lands outside the
+-- safe range is an error even when a negative day part would bring the result
+-- back inside.
+--
+-- jtimestamptz - jtimestamptz is core's timestamptz_mi (IMMUTABLE): elapsed
+-- days (of 24 hours) and time of day, no months. jdate - jtimestamptz and
+-- jtimestamptz - jdate take the day as its midnight in the session zone (core
+-- does this through its implicit cast date -> timestamptz, which these types
+-- do not have), so they are STABLE.
+--
+-- jdate + interval, interval + jdate, jdate - interval return jtimestamp
+-- (IMMUTABLE), as core's date + interval returns timestamp: the day is its
+-- midnight and the jtimestamp rules apply.
+--
+-- jdate + time and time + jdate return jtimestamp, jdate + timetz and
+-- timetz + jdate return jtimestamptz (all IMMUTABLE, the zone is in the
+-- timetz): exactly the date / time and date / timetz operators core has. Core
+-- has no timestamp + time, so there is no jtimestamp + time.
+--
+-- With these operators a bare literal next to a jdate is ambiguous: jdate + '5'
+-- is 42725, as date + '5' is in core. Write jdate + 5 or jdate + interval '5 days'.
+
+CREATE FUNCTION jtimestamptz_pl_interval(jtimestamptz, interval) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jtimestamptz_pl_interval' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION interval_pl_jtimestamptz(interval, jtimestamptz) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'interval_pl_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_mi_interval(jtimestamptz, interval) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jtimestamptz_mi_interval' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_mi(jtimestamptz, jtimestamptz) RETURNS interval
+    AS 'MODULE_PATHNAME', 'jtimestamptz_mi' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_mi_jtimestamptz(jdate, jtimestamptz) RETURNS interval
+    AS 'MODULE_PATHNAME', 'jdate_mi_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_mi_jdate(jtimestamptz, jdate) RETURNS interval
+    AS 'MODULE_PATHNAME', 'jtimestamptz_mi_jdate' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION jdate_pl_interval(jdate, interval) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jdate_pl_interval' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION interval_pl_jdate(interval, jdate) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'interval_pl_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_mi_interval(jdate, interval) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jdate_mi_interval' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION jdate_pl_time(jdate, time) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jdate_pl_time' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION time_pl_jdate(time, jdate) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'time_pl_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_pl_timetz(jdate, timetz) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jdate_pl_timetz' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION timetz_pl_jdate(timetz, jdate) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'timetz_pl_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR + (
+    LEFTARG = jtimestamptz, RIGHTARG = interval, PROCEDURE = jtimestamptz_pl_interval,
+    COMMUTATOR = +
+);
+-- Completes the shell operator that COMMUTATOR = + above creates.
+CREATE OPERATOR + (
+    LEFTARG = interval, RIGHTARG = jtimestamptz, PROCEDURE = interval_pl_jtimestamptz,
+    COMMUTATOR = +
+);
+CREATE OPERATOR - (
+    LEFTARG = jtimestamptz, RIGHTARG = interval, PROCEDURE = jtimestamptz_mi_interval
+);
+CREATE OPERATOR - (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamptz_mi
+);
+CREATE OPERATOR - (
+    LEFTARG = jdate, RIGHTARG = jtimestamptz, PROCEDURE = jdate_mi_jtimestamptz
+);
+CREATE OPERATOR - (
+    LEFTARG = jtimestamptz, RIGHTARG = jdate, PROCEDURE = jtimestamptz_mi_jdate
+);
+
+CREATE OPERATOR + (
+    LEFTARG = jdate, RIGHTARG = interval, PROCEDURE = jdate_pl_interval,
+    COMMUTATOR = +
+);
+CREATE OPERATOR + (
+    LEFTARG = interval, RIGHTARG = jdate, PROCEDURE = interval_pl_jdate,
+    COMMUTATOR = +
+);
+CREATE OPERATOR - (
+    LEFTARG = jdate, RIGHTARG = interval, PROCEDURE = jdate_mi_interval
+);
+
+CREATE OPERATOR + (
+    LEFTARG = jdate, RIGHTARG = time, PROCEDURE = jdate_pl_time,
+    COMMUTATOR = +
+);
+CREATE OPERATOR + (
+    LEFTARG = time, RIGHTARG = jdate, PROCEDURE = time_pl_jdate,
+    COMMUTATOR = +
+);
+CREATE OPERATOR + (
+    LEFTARG = jdate, RIGHTARG = timetz, PROCEDURE = jdate_pl_timetz,
+    COMMUTATOR = +
+);
+CREATE OPERATOR + (
+    LEFTARG = timetz, RIGHTARG = jdate, PROCEDURE = timetz_pl_jdate,
+    COMMUTATOR = +
+);
