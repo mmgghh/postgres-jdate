@@ -14,6 +14,7 @@
 
 #include "fmgr.h"
 #include "nodes/nodes.h"
+#include "pgtime.h"
 #include "datatype/timestamp.h"
 #include "utils/date.h"
 
@@ -245,5 +246,63 @@ typedef enum JdateFieldKind
  * infinity or NULL.
  */
 extern JdateFieldKind jdate_get_field(DateADT value, int val, int64 *result);
+
+/* ---------------------------------------------------------------------
+ * Jalali months, and the local wall clock of an instant
+ *
+ * Defined in src/jtimestamp_local.c. Shared by the interval arithmetic (J3),
+ * the date_bin and trunc code and the EXTRACT code (J4).
+ * ------------------------------------------------------------------- */
+
+/*
+ * Add "months" Jalali months to a valid Jalali date, as core adds months to a
+ * Gregorian one: the month count moves the (year, month) pair, and the day is
+ * kept unless the target month is shorter, when it becomes the last day of that
+ * month (1403-06-31 + 1 month is 1403-07-30). Negative counts floor, so
+ * 0000-01-31 - 1 month is -0001-12-29. The same rule makes it not invertible,
+ * exactly as in core. "months" is the type of Interval.month, so the year
+ * arithmetic cannot overflow. Returns false, leaving *out alone, when the
+ * target year lies outside the supported years (the caller raises the range
+ * error, jdate_range_error); true otherwise. *out may be the same as *in.
+ */
+extern bool jdate_add_months(const JalaaliDate *in, int32 months, JalaaliDate *out);
+
+/*
+ * The wall clock of an instant: the Jalali date and the time of day on the
+ * clock of one time zone (or on no zone, for a jtimestamp, which is already a
+ * wall clock). This is the only place that turns an instant into a local Jalali
+ * date and back, so every caller gets core's treatment of gaps and overlaps,
+ * which are never reimplemented here:
+ *
+ *   - instant to local goes through core's timestamp2tm, in the given zone;
+ *   - local to instant goes through core's DetermineTimeZoneOffset (which
+ *     decides the offset of a wall time that does not exist, or occurs twice,
+ *     as core does for timestamptz + interval and date_trunc) and tm2timestamp;
+ *   - the result is then range-checked (jtimestamp range, or for an instant the
+ *     jtimestamptz safe range): 22008 outside it.
+ *
+ * "date" is the Jalali day on that clock and "time" the microseconds since its
+ * midnight, 0 .. USECS_PER_DAY - 1. A caller changes "date" and/or "time" and
+ * converts back; a date outside the supported Jalali years (what
+ * jdate_add_months refuses) is not accepted on the way back and raises 22008.
+ * "tz" is only filled in by jt_local_from_instant: the offset core's
+ * timestamp2tm reports, in seconds WEST of UTC (core's sign), for callers that
+ * need the offset (the timezone fields); it is ignored on the way back.
+ *
+ * "zone" is a pg_tz (session_timezone, or one looked up by name); NULL means
+ * the session zone. Only finite values can be converted: an infinite one is
+ * the caller's to deal with first, and raises 22008 here.
+ */
+typedef struct JtLocal
+{
+	JalaaliDate date;
+	int64		time;
+	int			tz;
+} JtLocal;
+
+extern void jt_local_from_timestamp(Timestamp value, JtLocal *local);
+extern void jt_local_from_instant(TimestampTz instant, pg_tz *zone, JtLocal *local);
+extern Timestamp jt_local_to_timestamp(const JtLocal *local);
+extern TimestampTz jt_local_to_instant(const JtLocal *local, pg_tz *zone);
 
 #endif							/* JDATE_COMMON_H */

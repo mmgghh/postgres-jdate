@@ -1102,3 +1102,59 @@ ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
     OPERATOR 4 >= (jtimestamptz, jtimestamp),
     OPERATOR 5 > (jtimestamptz, jtimestamp),
     FUNCTION 1 (jtimestamptz, jtimestamp) jtimestamptz_cmp_jtimestamp(jtimestamptz, jtimestamp);
+
+-- ============================================================
+-- Interval arithmetic and differences for jtimestamp
+-- ============================================================
+--
+-- jtimestamp + interval, interval + jtimestamp, jtimestamp - interval: the
+-- month part of the interval is applied with Jalali month lengths, then the
+-- days and the time part by core's timestamp_pl_interval (months first, then
+-- days, then time, as core). A month step clamps to the last day of a shorter
+-- month (1403-06-31 + 1 month is 1403-07-30) and so is not invertible, as in
+-- core; 1 year is 12 months. The result is range-checked (22008). Infinity
+-- passes through; on PostgreSQL 17 and later an infinite interval is handled as
+-- core handles it. IMMUTABLE: the result depends on nothing but the arguments.
+--
+-- jtimestamp - jtimestamp is core's timestamp_mi: an interval of days and time
+-- of day, no months. jdate - jtimestamp and jtimestamp - jdate are the same with
+-- the day taken as its midnight (core gets them through its implicit cast
+-- date -> timestamp; these types have no implicit casts).
+--
+-- The C code is in src/jtimestamp_arith.c; the Jalali month arithmetic and the
+-- local-time helper it uses are in src/jtimestamp_local.c.
+
+CREATE FUNCTION jtimestamp_pl_interval(jtimestamp, interval) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jtimestamp_pl_interval' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION interval_pl_jtimestamp(interval, jtimestamp) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'interval_pl_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_mi_interval(jtimestamp, interval) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jtimestamp_mi_interval' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_mi(jtimestamp, jtimestamp) RETURNS interval
+    AS 'MODULE_PATHNAME', 'jtimestamp_mi' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_mi_jtimestamp(jdate, jtimestamp) RETURNS interval
+    AS 'MODULE_PATHNAME', 'jdate_mi_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_mi_jdate(jtimestamp, jdate) RETURNS interval
+    AS 'MODULE_PATHNAME', 'jtimestamp_mi_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR + (
+    LEFTARG = jtimestamp, RIGHTARG = interval, PROCEDURE = jtimestamp_pl_interval,
+    COMMUTATOR = +
+);
+-- Completes the shell operator that COMMUTATOR = + above creates.
+CREATE OPERATOR + (
+    LEFTARG = interval, RIGHTARG = jtimestamp, PROCEDURE = interval_pl_jtimestamp,
+    COMMUTATOR = +
+);
+CREATE OPERATOR - (
+    LEFTARG = jtimestamp, RIGHTARG = interval, PROCEDURE = jtimestamp_mi_interval
+);
+CREATE OPERATOR - (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamp, PROCEDURE = jtimestamp_mi
+);
+CREATE OPERATOR - (
+    LEFTARG = jdate, RIGHTARG = jtimestamp, PROCEDURE = jdate_mi_jtimestamp
+);
+CREATE OPERATOR - (
+    LEFTARG = jtimestamp, RIGHTARG = jdate, PROCEDURE = jtimestamp_mi_jdate
+);
