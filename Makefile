@@ -6,7 +6,7 @@ EXTENSION = jdate
 DATA = jdate--1.0.sql
 DOCS = README.md
 # Keep REGRESS on ONE line: dev/test-cluster.sh parses it.
-REGRESS = io casts operators arithmetic fields format range binary hash fullrange softerr tz_casts sqlstate parallel jt_io jt_casts jt_bounds jt_softerr jt_binary jt_fullrange jt_ops jt_hash extension_schema
+REGRESS = io casts operators arithmetic fields format range binary hash fullrange softerr tz_casts sqlstate parallel jt_io jt_casts jt_bounds jt_softerr jt_binary jt_fullrange jt_ops jt_hash jt_crossops extension_schema
 REGRESS_OPTS = --inputdir=test --outputdir=test
 # Binary built by `make test-jalaali` (rule below). Set before the PGXS include:
 # pgxs.mk tests `ifdef EXTRA_CLEAN` while it is being read.

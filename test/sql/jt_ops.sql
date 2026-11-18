@@ -692,26 +692,29 @@ JOIN pg_am a ON a.oid = c.opcmethod
 WHERE f.opfname = 'jdatetime_ops'
 ORDER BY c.opcintype::regtype::text COLLATE "C";
 
--- the family holds exactly the three same-type entries of five operators each
+-- the same-type entries of the family: five operators each (the cross-type
+-- entries are covered by jt_crossops)
 SELECT amoplefttype::regtype AS left_type, amoprighttype::regtype AS right_type,
        array_agg(amopstrategy ORDER BY amopstrategy) AS strategies,
        array_agg(amopopr::regoperator::text ORDER BY amopstrategy) AS operators
 FROM pg_amop
 WHERE amopfamily = (SELECT oid FROM pg_opfamily WHERE opfname = 'jdatetime_ops'
                     AND opfmethod = (SELECT oid FROM pg_am WHERE amname = 'btree'))
+  AND amoplefttype = amoprighttype
 GROUP BY amoplefttype, amoprighttype
 ORDER BY amoplefttype::regtype::text COLLATE "C";
 
--- support functions 1 (cmp), 2 (sort support) and 4 (equalimage) of each entry;
--- jdate_ops has the same three as before the family existed. Support 6 is
--- left out here, because it exists only on PostgreSQL 18 (next query).
+-- support functions 1 (cmp), 2 (sort support) and 4 (equalimage) of each
+-- same-type entry; jdate_ops has the same three as before the family existed.
+-- Support 6 is left out here, because it exists only on PostgreSQL 18 (next
+-- query). The cross-type entries have function 1 only (see jt_crossops).
 SELECT amproclefttype::regtype AS left_type, amprocrighttype::regtype AS right_type,
        array_agg(amprocnum ORDER BY amprocnum) AS numbers,
        array_agg(amproc::regprocedure::text ORDER BY amprocnum) AS functions
 FROM pg_amproc
 WHERE amprocfamily = (SELECT oid FROM pg_opfamily WHERE opfname = 'jdatetime_ops'
                       AND opfmethod = (SELECT oid FROM pg_am WHERE amname = 'btree'))
-  AND amprocnum <> 6
+  AND amprocnum <> 6 AND amproclefttype = amprocrighttype
 GROUP BY amproclefttype, amprocrighttype
 ORDER BY amproclefttype::regtype::text COLLATE "C";
 
@@ -738,10 +741,8 @@ WHERE amprocfamily = (SELECT oid FROM pg_opfamily WHERE opfname = 'jdatetime_ops
                       AND opfmethod = (SELECT oid FROM pg_am WHERE amname = 'btree'))
   AND amprocnum NOT IN (1, 2, 4, 6);
 
--- amvalidate is not asserted for the btree family yet: until the cross-type
--- matrix is added, it reports the missing cross-type operators between jdate,
--- jtimestamp and jtimestamptz (an INFO message and false), while each class on
--- its own is complete, as the three queries above show.
+-- amvalidate of the three btree classes (the whole family: the cross-type
+-- matrix completes it) is asserted in jt_crossops.
 
 -- the hash opclasses: default, one per type, support functions 1 and 2, and
 -- amvalidate accepts them

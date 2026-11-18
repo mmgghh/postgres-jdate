@@ -64,10 +64,10 @@ FROM pg_amproc
 WHERE amprocfamily = (SELECT opcfamily FROM pg_opclass WHERE opcname = 'jdate_ops')
   AND amproclefttype = 'jdate'::regtype AND amprocrighttype = 'jdate'::regtype;
 
--- amvalidate is not asserted for the family yet: until the cross-type matrix
--- is added to it, amvalidate reports the missing cross-type operators between
--- jdate, jtimestamp and jtimestamptz (an INFO message and false). The class
--- itself is complete: operators 1 to 5 and support functions 1, 2 and 4, above.
+-- amvalidate accepts the class and, with it, the whole family (the cross-type
+-- operators between jdate, jtimestamp and jtimestamptz are in it)
+SELECT amvalidate(oid) AS jdate_ops_valid
+FROM pg_opclass WHERE opcname = 'jdate_ops';
 
 -- ordering through the sort support path: duplicates, negative years, both
 -- range edges and infinity (positive and negative), 4,000 rows

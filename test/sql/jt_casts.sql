@@ -495,11 +495,12 @@ FROM (VALUES (jdate '-0061-01-01'), ('0000-01-01'), ('1402-12-29'), ('1403-01-01
 -- what does not exist: no implicit cast, no cast to the core types by a chain
 -- ---------------------------------------------------------------------
 \set VERBOSITY sqlstate
--- no operators between a Jalali type and a core type (nor between the two)
+-- no operators between a Jalali type and a core type (the Jalali types compare
+-- with each other, see jt_crossops)
 SELECT '1403-01-01'::jtimestamp = timestamp '2024-03-20';
 SELECT timestamp '2024-03-20' = '1403-01-01'::jtimestamp;
 SELECT '1403-01-01'::jtimestamptz = timestamptz '2024-03-20 00:00:00+00';
-SELECT '1403-01-01'::jtimestamp = '1403-01-01'::jtimestamptz;
+SELECT '1403-01-01'::jtimestamp = date '2024-03-20';
 -- no function takes a jtimestamp where it wants a timestamp
 SELECT date_trunc('day', '1403-01-01'::jtimestamp);
 SELECT date_trunc('day', '1403-01-01 00:00:00+00'::jtimestamptz);

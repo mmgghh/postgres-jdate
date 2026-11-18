@@ -531,8 +531,8 @@ CREATE CAST (jtimestamptz AS jtimestamptz) WITH FUNCTION jtimestamptz(jtimestamp
 -- Comparison operators, btree and hash opclasses for jtimestamp and jtimestamptz
 -- ============================================================
 --
--- Same-type comparison only (the cross-type matrix comes later). Every
--- function delegates to core's timestamp_eq, timestamp_lt, ... and
+-- Same-type comparison only (the cross-type matrix is at the end of this file).
+-- Every function delegates to core's timestamp_eq, timestamp_lt, ... and
 -- timestamp_cmp, which work on the shared int64 representation (core's
 -- timestamptz comparison functions are those same functions). All are
 -- IMMUTABLE, also for jtimestamptz: an instant compares the same in every time
@@ -739,3 +739,366 @@ CREATE AGGREGATE max(jtimestamptz) (
     SFUNC = jtimestamptz_larger, STYPE = jtimestamptz, COMBINEFUNC = jtimestamptz_larger,
     SORTOP = >, PARALLEL = SAFE
 );
+
+-- ============================================================
+-- Cross-type comparison: jdate, jtimestamp and jtimestamptz against each other
+-- ============================================================
+--
+-- The three types compare with each other in both argument orders: 6 ordered
+-- pairs, each with the six operators and one cmp function: 36 operators, backed
+-- by 36 operator functions and 6 cmp functions. The functions are C wrappers (src/jtimestamp_ops.c) over
+-- core's date_eq_timestamp, timestamp_eq_timestamptz, date_eq_timestamptz ...
+-- family, which compare the mirrored core types; jdate is binary compatible
+-- with date and the timestamp types with timestamp and timestamptz.
+--
+-- Volatility follows core's: a pair that involves jtimestamptz and a type
+-- without a zone (jdate, jtimestamp) is STABLE, because the other value is
+-- placed on the time line in the session zone; the jdate / jtimestamp pairs
+-- are IMMUTABLE. `=` is MERGES but not HASHES: core has no cross-type hash
+-- either, so a join of two of these types is a merge join or a nested loop.
+-- `<>` stays outside the btree family, as for the same-type operators.
+--
+-- Every operator is added to the family jdatetime_ops (strategies 1 to 5), with
+-- only support function 1 (the cmp function) on the cross-type entries, as core
+-- does in datetime_ops. That gives the family 45 operators (3 same-type and 6
+-- cross-type entries of 5 each) and 9 `<>` operators outside it, and lets the
+-- planner use an index on one of the types for a predicate on another and
+-- merge-join across them. No operator against a core type and no implicit
+-- cast is added: `jdate = date` stays an error, and a bare literal still
+-- resolves to the same-type operator.
+
+-- jdate against jtimestamp (IMMUTABLE: no time zone is read)
+
+CREATE FUNCTION jdate_eq_jtimestamp(jdate, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jdate_eq_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_ne_jtimestamp(jdate, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jdate_ne_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_lt_jtimestamp(jdate, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jdate_lt_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_le_jtimestamp(jdate, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jdate_le_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_gt_jtimestamp(jdate, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jdate_gt_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_ge_jtimestamp(jdate, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jdate_ge_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_cmp_jtimestamp(jdate, jtimestamp) RETURNS int4
+    AS 'MODULE_PATHNAME', 'jdate_cmp_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR = (
+    LEFTARG = jdate, RIGHTARG = jtimestamp, PROCEDURE = jdate_eq_jtimestamp,
+    COMMUTATOR = =, NEGATOR = <>,
+    RESTRICT = eqsel, JOIN = eqjoinsel, MERGES
+);
+CREATE OPERATOR <> (
+    LEFTARG = jdate, RIGHTARG = jtimestamp, PROCEDURE = jdate_ne_jtimestamp,
+    COMMUTATOR = <>, NEGATOR = =,
+    RESTRICT = neqsel, JOIN = neqjoinsel
+);
+CREATE OPERATOR < (
+    LEFTARG = jdate, RIGHTARG = jtimestamp, PROCEDURE = jdate_lt_jtimestamp,
+    COMMUTATOR = >, NEGATOR = >=,
+    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+CREATE OPERATOR <= (
+    LEFTARG = jdate, RIGHTARG = jtimestamp, PROCEDURE = jdate_le_jtimestamp,
+    COMMUTATOR = >=, NEGATOR = >,
+    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+CREATE OPERATOR > (
+    LEFTARG = jdate, RIGHTARG = jtimestamp, PROCEDURE = jdate_gt_jtimestamp,
+    COMMUTATOR = <, NEGATOR = <=,
+    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+CREATE OPERATOR >= (
+    LEFTARG = jdate, RIGHTARG = jtimestamp, PROCEDURE = jdate_ge_jtimestamp,
+    COMMUTATOR = <=, NEGATOR = <,
+    RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
+    OPERATOR 1 < (jdate, jtimestamp),
+    OPERATOR 2 <= (jdate, jtimestamp),
+    OPERATOR 3 = (jdate, jtimestamp),
+    OPERATOR 4 >= (jdate, jtimestamp),
+    OPERATOR 5 > (jdate, jtimestamp),
+    FUNCTION 1 (jdate, jtimestamp) jdate_cmp_jtimestamp(jdate, jtimestamp);
+
+-- jtimestamp against jdate (IMMUTABLE: no time zone is read)
+
+CREATE FUNCTION jtimestamp_eq_jdate(jtimestamp, jdate) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_eq_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_ne_jdate(jtimestamp, jdate) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_ne_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_lt_jdate(jtimestamp, jdate) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_lt_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_le_jdate(jtimestamp, jdate) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_le_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_gt_jdate(jtimestamp, jdate) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_gt_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_ge_jdate(jtimestamp, jdate) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_ge_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_cmp_jdate(jtimestamp, jdate) RETURNS int4
+    AS 'MODULE_PATHNAME', 'jtimestamp_cmp_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR = (
+    LEFTARG = jtimestamp, RIGHTARG = jdate, PROCEDURE = jtimestamp_eq_jdate,
+    COMMUTATOR = =, NEGATOR = <>,
+    RESTRICT = eqsel, JOIN = eqjoinsel, MERGES
+);
+CREATE OPERATOR <> (
+    LEFTARG = jtimestamp, RIGHTARG = jdate, PROCEDURE = jtimestamp_ne_jdate,
+    COMMUTATOR = <>, NEGATOR = =,
+    RESTRICT = neqsel, JOIN = neqjoinsel
+);
+CREATE OPERATOR < (
+    LEFTARG = jtimestamp, RIGHTARG = jdate, PROCEDURE = jtimestamp_lt_jdate,
+    COMMUTATOR = >, NEGATOR = >=,
+    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+CREATE OPERATOR <= (
+    LEFTARG = jtimestamp, RIGHTARG = jdate, PROCEDURE = jtimestamp_le_jdate,
+    COMMUTATOR = >=, NEGATOR = >,
+    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+CREATE OPERATOR > (
+    LEFTARG = jtimestamp, RIGHTARG = jdate, PROCEDURE = jtimestamp_gt_jdate,
+    COMMUTATOR = <, NEGATOR = <=,
+    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+CREATE OPERATOR >= (
+    LEFTARG = jtimestamp, RIGHTARG = jdate, PROCEDURE = jtimestamp_ge_jdate,
+    COMMUTATOR = <=, NEGATOR = <,
+    RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
+    OPERATOR 1 < (jtimestamp, jdate),
+    OPERATOR 2 <= (jtimestamp, jdate),
+    OPERATOR 3 = (jtimestamp, jdate),
+    OPERATOR 4 >= (jtimestamp, jdate),
+    OPERATOR 5 > (jtimestamp, jdate),
+    FUNCTION 1 (jtimestamp, jdate) jtimestamp_cmp_jdate(jtimestamp, jdate);
+
+-- jdate against jtimestamptz (STABLE: reads the session time zone)
+
+CREATE FUNCTION jdate_eq_jtimestamptz(jdate, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jdate_eq_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_ne_jtimestamptz(jdate, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jdate_ne_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_lt_jtimestamptz(jdate, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jdate_lt_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_le_jtimestamptz(jdate, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jdate_le_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_gt_jtimestamptz(jdate, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jdate_gt_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_ge_jtimestamptz(jdate, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jdate_ge_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_cmp_jtimestamptz(jdate, jtimestamptz) RETURNS int4
+    AS 'MODULE_PATHNAME', 'jdate_cmp_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR = (
+    LEFTARG = jdate, RIGHTARG = jtimestamptz, PROCEDURE = jdate_eq_jtimestamptz,
+    COMMUTATOR = =, NEGATOR = <>,
+    RESTRICT = eqsel, JOIN = eqjoinsel, MERGES
+);
+CREATE OPERATOR <> (
+    LEFTARG = jdate, RIGHTARG = jtimestamptz, PROCEDURE = jdate_ne_jtimestamptz,
+    COMMUTATOR = <>, NEGATOR = =,
+    RESTRICT = neqsel, JOIN = neqjoinsel
+);
+CREATE OPERATOR < (
+    LEFTARG = jdate, RIGHTARG = jtimestamptz, PROCEDURE = jdate_lt_jtimestamptz,
+    COMMUTATOR = >, NEGATOR = >=,
+    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+CREATE OPERATOR <= (
+    LEFTARG = jdate, RIGHTARG = jtimestamptz, PROCEDURE = jdate_le_jtimestamptz,
+    COMMUTATOR = >=, NEGATOR = >,
+    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+CREATE OPERATOR > (
+    LEFTARG = jdate, RIGHTARG = jtimestamptz, PROCEDURE = jdate_gt_jtimestamptz,
+    COMMUTATOR = <, NEGATOR = <=,
+    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+CREATE OPERATOR >= (
+    LEFTARG = jdate, RIGHTARG = jtimestamptz, PROCEDURE = jdate_ge_jtimestamptz,
+    COMMUTATOR = <=, NEGATOR = <,
+    RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
+    OPERATOR 1 < (jdate, jtimestamptz),
+    OPERATOR 2 <= (jdate, jtimestamptz),
+    OPERATOR 3 = (jdate, jtimestamptz),
+    OPERATOR 4 >= (jdate, jtimestamptz),
+    OPERATOR 5 > (jdate, jtimestamptz),
+    FUNCTION 1 (jdate, jtimestamptz) jdate_cmp_jtimestamptz(jdate, jtimestamptz);
+
+-- jtimestamptz against jdate (STABLE: reads the session time zone)
+
+CREATE FUNCTION jtimestamptz_eq_jdate(jtimestamptz, jdate) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_eq_jdate' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_ne_jdate(jtimestamptz, jdate) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_ne_jdate' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_lt_jdate(jtimestamptz, jdate) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_lt_jdate' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_le_jdate(jtimestamptz, jdate) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_le_jdate' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_gt_jdate(jtimestamptz, jdate) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_gt_jdate' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_ge_jdate(jtimestamptz, jdate) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_ge_jdate' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_cmp_jdate(jtimestamptz, jdate) RETURNS int4
+    AS 'MODULE_PATHNAME', 'jtimestamptz_cmp_jdate' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR = (
+    LEFTARG = jtimestamptz, RIGHTARG = jdate, PROCEDURE = jtimestamptz_eq_jdate,
+    COMMUTATOR = =, NEGATOR = <>,
+    RESTRICT = eqsel, JOIN = eqjoinsel, MERGES
+);
+CREATE OPERATOR <> (
+    LEFTARG = jtimestamptz, RIGHTARG = jdate, PROCEDURE = jtimestamptz_ne_jdate,
+    COMMUTATOR = <>, NEGATOR = =,
+    RESTRICT = neqsel, JOIN = neqjoinsel
+);
+CREATE OPERATOR < (
+    LEFTARG = jtimestamptz, RIGHTARG = jdate, PROCEDURE = jtimestamptz_lt_jdate,
+    COMMUTATOR = >, NEGATOR = >=,
+    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+CREATE OPERATOR <= (
+    LEFTARG = jtimestamptz, RIGHTARG = jdate, PROCEDURE = jtimestamptz_le_jdate,
+    COMMUTATOR = >=, NEGATOR = >,
+    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+CREATE OPERATOR > (
+    LEFTARG = jtimestamptz, RIGHTARG = jdate, PROCEDURE = jtimestamptz_gt_jdate,
+    COMMUTATOR = <, NEGATOR = <=,
+    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+CREATE OPERATOR >= (
+    LEFTARG = jtimestamptz, RIGHTARG = jdate, PROCEDURE = jtimestamptz_ge_jdate,
+    COMMUTATOR = <=, NEGATOR = <,
+    RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
+    OPERATOR 1 < (jtimestamptz, jdate),
+    OPERATOR 2 <= (jtimestamptz, jdate),
+    OPERATOR 3 = (jtimestamptz, jdate),
+    OPERATOR 4 >= (jtimestamptz, jdate),
+    OPERATOR 5 > (jtimestamptz, jdate),
+    FUNCTION 1 (jtimestamptz, jdate) jtimestamptz_cmp_jdate(jtimestamptz, jdate);
+
+-- jtimestamp against jtimestamptz (STABLE: reads the session time zone)
+
+CREATE FUNCTION jtimestamp_eq_jtimestamptz(jtimestamp, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_eq_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_ne_jtimestamptz(jtimestamp, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_ne_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_lt_jtimestamptz(jtimestamp, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_lt_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_le_jtimestamptz(jtimestamp, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_le_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_gt_jtimestamptz(jtimestamp, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_gt_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_ge_jtimestamptz(jtimestamp, jtimestamptz) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamp_ge_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamp_cmp_jtimestamptz(jtimestamp, jtimestamptz) RETURNS int4
+    AS 'MODULE_PATHNAME', 'jtimestamp_cmp_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR = (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamp_eq_jtimestamptz,
+    COMMUTATOR = =, NEGATOR = <>,
+    RESTRICT = eqsel, JOIN = eqjoinsel, MERGES
+);
+CREATE OPERATOR <> (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamp_ne_jtimestamptz,
+    COMMUTATOR = <>, NEGATOR = =,
+    RESTRICT = neqsel, JOIN = neqjoinsel
+);
+CREATE OPERATOR < (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamp_lt_jtimestamptz,
+    COMMUTATOR = >, NEGATOR = >=,
+    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+CREATE OPERATOR <= (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamp_le_jtimestamptz,
+    COMMUTATOR = >=, NEGATOR = >,
+    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+CREATE OPERATOR > (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamp_gt_jtimestamptz,
+    COMMUTATOR = <, NEGATOR = <=,
+    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+CREATE OPERATOR >= (
+    LEFTARG = jtimestamp, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamp_ge_jtimestamptz,
+    COMMUTATOR = <=, NEGATOR = <,
+    RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
+    OPERATOR 1 < (jtimestamp, jtimestamptz),
+    OPERATOR 2 <= (jtimestamp, jtimestamptz),
+    OPERATOR 3 = (jtimestamp, jtimestamptz),
+    OPERATOR 4 >= (jtimestamp, jtimestamptz),
+    OPERATOR 5 > (jtimestamp, jtimestamptz),
+    FUNCTION 1 (jtimestamp, jtimestamptz) jtimestamp_cmp_jtimestamptz(jtimestamp, jtimestamptz);
+
+-- jtimestamptz against jtimestamp (STABLE: reads the session time zone)
+
+CREATE FUNCTION jtimestamptz_eq_jtimestamp(jtimestamptz, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_eq_jtimestamp' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_ne_jtimestamp(jtimestamptz, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_ne_jtimestamp' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_lt_jtimestamp(jtimestamptz, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_lt_jtimestamp' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_le_jtimestamp(jtimestamptz, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_le_jtimestamp' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_gt_jtimestamp(jtimestamptz, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_gt_jtimestamp' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_ge_jtimestamp(jtimestamptz, jtimestamp) RETURNS bool
+    AS 'MODULE_PATHNAME', 'jtimestamptz_ge_jtimestamp' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jtimestamptz_cmp_jtimestamp(jtimestamptz, jtimestamp) RETURNS int4
+    AS 'MODULE_PATHNAME', 'jtimestamptz_cmp_jtimestamp' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR = (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamp, PROCEDURE = jtimestamptz_eq_jtimestamp,
+    COMMUTATOR = =, NEGATOR = <>,
+    RESTRICT = eqsel, JOIN = eqjoinsel, MERGES
+);
+CREATE OPERATOR <> (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamp, PROCEDURE = jtimestamptz_ne_jtimestamp,
+    COMMUTATOR = <>, NEGATOR = =,
+    RESTRICT = neqsel, JOIN = neqjoinsel
+);
+CREATE OPERATOR < (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamp, PROCEDURE = jtimestamptz_lt_jtimestamp,
+    COMMUTATOR = >, NEGATOR = >=,
+    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+CREATE OPERATOR <= (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamp, PROCEDURE = jtimestamptz_le_jtimestamp,
+    COMMUTATOR = >=, NEGATOR = >,
+    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+CREATE OPERATOR > (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamp, PROCEDURE = jtimestamptz_gt_jtimestamp,
+    COMMUTATOR = <, NEGATOR = <=,
+    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+CREATE OPERATOR >= (
+    LEFTARG = jtimestamptz, RIGHTARG = jtimestamp, PROCEDURE = jtimestamptz_ge_jtimestamp,
+    COMMUTATOR = <=, NEGATOR = <,
+    RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
+    OPERATOR 1 < (jtimestamptz, jtimestamp),
+    OPERATOR 2 <= (jtimestamptz, jtimestamp),
+    OPERATOR 3 = (jtimestamptz, jtimestamp),
+    OPERATOR 4 >= (jtimestamptz, jtimestamp),
+    OPERATOR 5 > (jtimestamptz, jtimestamp),
+    FUNCTION 1 (jtimestamptz, jtimestamp) jtimestamptz_cmp_jtimestamp(jtimestamptz, jtimestamp);

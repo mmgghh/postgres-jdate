@@ -1,0 +1,916 @@
+-- Cross-type comparison between jdate, jtimestamp and jtimestamptz: the six
+-- operators for each of the six ordered pairs, their catalog entries, the
+-- shared btree family jdatetime_ops (45 operators, `<>` outside it), merge
+-- joins and index scans across the types, and what must still fail. Results
+-- are checked against core's operators on the same values converted to
+-- date / timestamp / timestamptz, and against an independent oracle (the
+-- instants as exact epoch numbers). Errors are shown as SQLSTATE only; plans
+-- are never printed, only booleans taken from them.
+--
+-- Everything created here is temporary or dropped at the end: extension_schema
+-- runs DROP EXTENSION, which needs no column of our types left behind.
+SET DateStyle = 'ISO, YMD';
+SET timezone = 'UTC';
+-- no JIT: compiling the matrix function below takes about a second per call
+-- (the 7 zone runs), running it takes milliseconds
+SET jit = off;
+\set VERBOSITY sqlstate
+-- EXPLAIN node lines with the indentation and "->" stripped, so the test can
+-- turn the plan into booleans without printing it.
+CREATE FUNCTION jt_cx_plan(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS off) ' || query LOOP
+        RETURN NEXT regexp_replace(line, '^[ ]*(->)?[ ]*', '');
+    END LOOP;
+END
+$$;
+-- ---------------------------------------------------------------------
+-- the operators in the catalog: 6 per operator name, one per ordered pair
+-- ---------------------------------------------------------------------
+-- estimators and flags per operator name: `=` merges but does not hash
+SELECT o.oprname AS operator,
+       o.oprrest::regproc AS restrict, o.oprjoin::regproc AS join_estimator,
+       o.oprcanhash AS hashes, o.oprcanmerge AS merges,
+       c.oprname AS commutator, n.oprname AS negator,
+       count(*) AS pairs
+FROM pg_operator o
+LEFT JOIN pg_operator c ON c.oid = o.oprcom
+LEFT JOIN pg_operator n ON n.oid = o.oprnegate
+WHERE o.oprleft <> o.oprright
+  AND o.oprname IN ('=', '<>', '<', '<=', '>', '>=')
+  AND o.oprleft IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype)
+  AND o.oprright IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype)
+GROUP BY 1, 2, 3, 4, 5, 6, 7
+ORDER BY o.oprname COLLATE "C";
+ operator |  restrict   | join_estimator  | hashes | merges | commutator | negator | pairs 
+----------+-------------+-----------------+--------+--------+------------+---------+-------
+ <        | scalarltsel | scalarltjoinsel | f      | f      | >          | >=      |     6
+ <=       | scalarlesel | scalarlejoinsel | f      | f      | >=         | >       |     6
+ <>       | neqsel      | neqjoinsel      | f      | f      | <>         | =       |     6
+ =        | eqsel       | eqjoinsel       | f      | t      | =          | <>      |     6
+ >        | scalargtsel | scalargtjoinsel | f      | f      | <          | <=      |     6
+ >=       | scalargesel | scalargejoinsel | f      | f      | <=         | <       |     6
+(6 rows)
+
+-- every cross-type operator has its commutator on the reversed pair and its
+-- negator on the same pair, and both point back
+SELECT count(*) AS operators,
+       count(*) FILTER (WHERE c.oprleft = o.oprright AND c.oprright = o.oprleft
+                          AND c.oprcom = o.oid) AS commutators_on_reversed_pair,
+       count(*) FILTER (WHERE n.oprleft = o.oprleft AND n.oprright = o.oprright
+                          AND n.oprnegate = o.oid) AS negators_on_same_pair
+FROM pg_operator o
+JOIN pg_operator c ON c.oid = o.oprcom
+JOIN pg_operator n ON n.oid = o.oprnegate
+WHERE o.oprleft <> o.oprright
+  AND o.oprname IN ('=', '<>', '<', '<=', '>', '>=')
+  AND o.oprleft IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype)
+  AND o.oprright IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype);
+ operators | commutators_on_reversed_pair | negators_on_same_pair 
+-----------+------------------------------+-----------------------
+        36 |                           36 |                    36
+(1 row)
+
+-- the functions: 7 per ordered pair (six operators and cmp), STABLE where the
+-- pair involves jtimestamptz and a type without a zone, IMMUTABLE for jdate
+-- against jtimestamp; always STRICT, PARALLEL SAFE and C functions
+SELECT s.left_type, s.right_type, s.volatility, s.parallel, s.strict, s.language, s.functions
+FROM (SELECT p.proargtypes[0]::regtype::text AS left_type, p.proargtypes[1]::regtype::text AS right_type,
+             p.provolatile AS volatility, p.proparallel AS parallel, p.proisstrict AS strict,
+             l.lanname AS language, count(*) AS functions
+      FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
+      WHERE p.pronargs = 2 AND p.proargtypes[0] <> p.proargtypes[1]
+        AND p.proargtypes[0] IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype)
+        AND p.proargtypes[1] IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype)
+        AND p.proname ~ '_(eq|ne|lt|le|gt|ge|cmp)_'
+      GROUP BY 1, 2, 3, 4, 5, 6) s
+ORDER BY s.left_type COLLATE "C", s.right_type COLLATE "C";
+  left_type   |  right_type  | volatility | parallel | strict | language | functions 
+--------------+--------------+------------+----------+--------+----------+-----------
+ jdate        | jtimestamp   | i          | s        | t      | c        |         7
+ jdate        | jtimestamptz | s          | s        | t      | c        |         7
+ jtimestamp   | jdate        | i          | s        | t      | c        |         7
+ jtimestamp   | jtimestamptz | s          | s        | t      | c        |         7
+ jtimestamptz | jdate        | s          | s        | t      | c        |         7
+ jtimestamptz | jtimestamp   | s          | s        | t      | c        |         7
+(6 rows)
+
+-- the operator functions return bool, the cmp functions int4
+SELECT s.function, s.returns, s.pairs
+FROM (SELECT regexp_replace(p.proname, '^.*_(eq|ne|lt|le|gt|ge|cmp)_.*$', '\1') AS function,
+             p.prorettype::regtype AS returns, count(*) AS pairs
+      FROM pg_proc p
+      WHERE p.pronargs = 2 AND p.proargtypes[0] <> p.proargtypes[1]
+        AND p.proargtypes[0] IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype)
+        AND p.proargtypes[1] IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype)
+        AND p.proname ~ '_(eq|ne|lt|le|gt|ge|cmp)_'
+      GROUP BY 1, 2) s
+ORDER BY s.function COLLATE "C";
+ function | returns | pairs 
+----------+---------+-------
+ cmp      | integer |     6
+ eq       | boolean |     6
+ ge       | boolean |     6
+ gt       | boolean |     6
+ le       | boolean |     6
+ lt       | boolean |     6
+ ne       | boolean |     6
+(7 rows)
+
+-- each operator runs the function of its own name and pair, and the volatility
+-- rule holds for the operator functions: the volatility of the function is
+-- the one the pair calls for
+SELECT count(*) AS operators,
+       count(*) FILTER (WHERE p.proname = format('%s_%s_%s',
+              o.oprleft::regtype,
+              CASE o.oprname WHEN '=' THEN 'eq' WHEN '<>' THEN 'ne' WHEN '<' THEN 'lt'
+                             WHEN '<=' THEN 'le' WHEN '>' THEN 'gt' ELSE 'ge' END,
+              o.oprright::regtype)) AS function_named_for_the_pair,
+       count(*) FILTER (WHERE p.provolatile = CASE WHEN 'jtimestamptz'::regtype IN (o.oprleft, o.oprright)
+                                                   THEN 's' ELSE 'i' END) AS volatility_as_expected
+FROM pg_operator o JOIN pg_proc p ON p.oid = o.oprcode
+WHERE o.oprleft <> o.oprright
+  AND o.oprname IN ('=', '<>', '<', '<=', '>', '>=')
+  AND o.oprleft IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype)
+  AND o.oprright IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype);
+ operators | function_named_for_the_pair | volatility_as_expected 
+-----------+-----------------------------+------------------------
+        36 |                          36 |                     36
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- the btree family jdatetime_ops: 45 operators, 9 `<>` outside it
+-- ---------------------------------------------------------------------
+-- three same-type entries and six cross-type entries, five operators each
+SELECT amoplefttype::regtype AS left_type, amoprighttype::regtype AS right_type,
+       array_agg(amopstrategy ORDER BY amopstrategy) AS strategies,
+       array_agg(amopopr::regoperator::text ORDER BY amopstrategy) AS operators
+FROM pg_amop
+WHERE amopfamily = (SELECT oid FROM pg_opfamily WHERE opfname = 'jdatetime_ops'
+                    AND opfmethod = (SELECT oid FROM pg_am WHERE amname = 'btree'))
+GROUP BY amoplefttype, amoprighttype
+ORDER BY amoplefttype::regtype::text COLLATE "C", amoprighttype::regtype::text COLLATE "C";
+  left_type   |  right_type  | strategies  |                                                                           operators                                                                            
+--------------+--------------+-------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+ jdate        | jdate        | {1,2,3,4,5} | {"<(jdate,jdate)","<=(jdate,jdate)","=(jdate,jdate)",">=(jdate,jdate)",">(jdate,jdate)"}
+ jdate        | jtimestamp   | {1,2,3,4,5} | {"<(jdate,jtimestamp)","<=(jdate,jtimestamp)","=(jdate,jtimestamp)",">=(jdate,jtimestamp)",">(jdate,jtimestamp)"}
+ jdate        | jtimestamptz | {1,2,3,4,5} | {"<(jdate,jtimestamptz)","<=(jdate,jtimestamptz)","=(jdate,jtimestamptz)",">=(jdate,jtimestamptz)",">(jdate,jtimestamptz)"}
+ jtimestamp   | jdate        | {1,2,3,4,5} | {"<(jtimestamp,jdate)","<=(jtimestamp,jdate)","=(jtimestamp,jdate)",">=(jtimestamp,jdate)",">(jtimestamp,jdate)"}
+ jtimestamp   | jtimestamp   | {1,2,3,4,5} | {"<(jtimestamp,jtimestamp)","<=(jtimestamp,jtimestamp)","=(jtimestamp,jtimestamp)",">=(jtimestamp,jtimestamp)",">(jtimestamp,jtimestamp)"}
+ jtimestamp   | jtimestamptz | {1,2,3,4,5} | {"<(jtimestamp,jtimestamptz)","<=(jtimestamp,jtimestamptz)","=(jtimestamp,jtimestamptz)",">=(jtimestamp,jtimestamptz)",">(jtimestamp,jtimestamptz)"}
+ jtimestamptz | jdate        | {1,2,3,4,5} | {"<(jtimestamptz,jdate)","<=(jtimestamptz,jdate)","=(jtimestamptz,jdate)",">=(jtimestamptz,jdate)",">(jtimestamptz,jdate)"}
+ jtimestamptz | jtimestamp   | {1,2,3,4,5} | {"<(jtimestamptz,jtimestamp)","<=(jtimestamptz,jtimestamp)","=(jtimestamptz,jtimestamp)",">=(jtimestamptz,jtimestamp)",">(jtimestamptz,jtimestamp)"}
+ jtimestamptz | jtimestamptz | {1,2,3,4,5} | {"<(jtimestamptz,jtimestamptz)","<=(jtimestamptz,jtimestamptz)","=(jtimestamptz,jtimestamptz)",">=(jtimestamptz,jtimestamptz)",">(jtimestamptz,jtimestamptz)"}
+(9 rows)
+
+-- the totals: 45 operators in the family, nine per strategy, every one a
+-- search operator of the family (not ordering); the nine `<>` operators of
+-- the three types (3 same-type, 6 cross-type) are none of them in it
+SELECT count(*) AS family_operators,
+       count(DISTINCT amopopr) AS distinct_operators,
+       count(*) FILTER (WHERE amoppurpose = 's') AS search_operators,
+       (SELECT count(*) FROM pg_operator o
+        WHERE o.oprname = '<>'
+          AND o.oprleft IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype)
+          AND o.oprright IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype)) AS not_equal_operators,
+       (SELECT count(*) FROM pg_amop a JOIN pg_operator o ON o.oid = a.amopopr
+        WHERE a.amopfamily = f.oid AND o.oprname = '<>') AS not_equal_in_family
+FROM pg_amop m, (SELECT oid FROM pg_opfamily WHERE opfname = 'jdatetime_ops'
+                 AND opfmethod = (SELECT oid FROM pg_am WHERE amname = 'btree')) f
+WHERE m.amopfamily = f.oid
+GROUP BY f.oid;
+ family_operators | distinct_operators | search_operators | not_equal_operators | not_equal_in_family 
+------------------+--------------------+------------------+---------------------+---------------------
+               45 |                 45 |               45 |                   9 |                   0
+(1 row)
+
+SELECT amopstrategy AS strategy, count(*) AS operators
+FROM pg_amop
+WHERE amopfamily = (SELECT oid FROM pg_opfamily WHERE opfname = 'jdatetime_ops'
+                    AND opfmethod = (SELECT oid FROM pg_am WHERE amname = 'btree'))
+GROUP BY 1 ORDER BY 1;
+ strategy | operators 
+----------+-----------
+        1 |         9
+        2 |         9
+        3 |         9
+        4 |         9
+        5 |         9
+(5 rows)
+
+-- every cross-type entry has exactly support function 1, its own cmp function
+-- (no sort support, equalimage or skip support: those are same-type entries)
+SELECT amproclefttype::regtype AS left_type, amprocrighttype::regtype AS right_type,
+       array_agg(amprocnum ORDER BY amprocnum) AS numbers,
+       array_agg(amproc::regprocedure::text ORDER BY amprocnum) AS functions
+FROM pg_amproc
+WHERE amprocfamily = (SELECT oid FROM pg_opfamily WHERE opfname = 'jdatetime_ops'
+                      AND opfmethod = (SELECT oid FROM pg_am WHERE amname = 'btree'))
+  AND amproclefttype <> amprocrighttype
+GROUP BY amproclefttype, amprocrighttype
+ORDER BY amproclefttype::regtype::text COLLATE "C", amprocrighttype::regtype::text COLLATE "C";
+  left_type   |  right_type  | numbers |                        functions                         
+--------------+--------------+---------+----------------------------------------------------------
+ jdate        | jtimestamp   | {1}     | {"jdate_cmp_jtimestamp(jdate,jtimestamp)"}
+ jdate        | jtimestamptz | {1}     | {"jdate_cmp_jtimestamptz(jdate,jtimestamptz)"}
+ jtimestamp   | jdate        | {1}     | {"jtimestamp_cmp_jdate(jtimestamp,jdate)"}
+ jtimestamp   | jtimestamptz | {1}     | {"jtimestamp_cmp_jtimestamptz(jtimestamp,jtimestamptz)"}
+ jtimestamptz | jdate        | {1}     | {"jtimestamptz_cmp_jdate(jtimestamptz,jdate)"}
+ jtimestamptz | jtimestamp   | {1}     | {"jtimestamptz_cmp_jtimestamp(jtimestamptz,jtimestamp)"}
+(6 rows)
+
+-- the whole family validates: amvalidate accepts all three btree classes (it
+-- reports a missing cross-type operator or function as a message and false)
+SELECT c.opcname AS class, c.opcintype::regtype AS type, amvalidate(c.oid) AS valid
+FROM pg_opclass c
+JOIN pg_opfamily f ON f.oid = c.opcfamily
+WHERE f.opfname = 'jdatetime_ops'
+ORDER BY c.opcname COLLATE "C";
+      class       |     type     | valid 
+------------------+--------------+-------
+ jdate_ops        | jdate        | t
+ jtimestamp_ops   | jtimestamp   | t
+ jtimestamptz_ops | jtimestamptz | t
+(3 rows)
+
+-- ---------------------------------------------------------------------
+-- the values: edges, infinities, equal values written differently and, for
+-- jtimestamptz, the same local midnight of Nowruz 1403 (2024-03-20) in the
+-- offsets of the zones used below. `c` is the same value as the core type;
+-- it never errs, so it is the oracle for what the operators say.
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE jt_cx_d (id int PRIMARY KEY, v jdate, c date);
+INSERT INTO jt_cx_d (id, v)
+SELECT row_number() OVER (), x FROM (VALUES
+    ('-infinity'::jdate), ('-0061-01-01'), ('-0061-01-02'), ('1402-12-29'), ('1403-01-01'),
+    ('1403-01-02'), ('3177-12-28'), ('3177-12-29'), ('infinity')) t(x);
+UPDATE jt_cx_d SET c = v::date;
+CREATE TEMP TABLE jt_cx_ts (id int PRIMARY KEY, v jtimestamp, c timestamp);
+INSERT INTO jt_cx_ts (id, v)
+SELECT row_number() OVER (), x FROM (VALUES
+    ('-infinity'::jtimestamp), ('-0061-01-01 00:00:00'), ('-0061-01-01 00:00:00.000001'),
+    ('-0061-01-02 00:00:00'), ('1402-12-29 23:59:59.999999'), ('1403-01-01 00:00:00'),
+    ('1403-01-01 00:00:00.000001'), ('1403-01-01 12:00:00'), ('1403-01-02 00:00:00'),
+    ('3177-12-28 23:59:59.999999'), ('3177-12-29 00:00:00'), ('3177-12-29 23:59:59.999999'),
+    ('infinity')) t(x);
+UPDATE jt_cx_ts SET c = v::timestamp;
+-- jtimestamptz values carry their offset, so they are the same instants under
+-- every session zone: the first and last valid instants, the instants one
+-- microsecond around Nowruz, and 1403-01-01 00:00:00 in each zone's offset
+CREATE TEMP TABLE jt_cx_tz (id int PRIMARY KEY, v jtimestamptz, c timestamptz);
+INSERT INTO jt_cx_tz (id, v)
+SELECT row_number() OVER (), x FROM (VALUES
+    ('-infinity'::jtimestamptz), ('-0061-01-01 16:00:00+00'), ('-0061-01-01 16:00:00.000001+00'),
+    ('1402-12-29 23:59:59.999999+00'), ('1403-01-01 00:00:00+00'), ('1403-01-01 00:00:00.000001+00'),
+    ('1403-01-01 00:00:00+03:30'), ('1403-01-01 00:00:00-04'), ('1403-01-01 00:00:00+14'),
+    ('1403-01-01 00:00:00-11'), ('1403-01-01 00:00:00+15:59'), ('1403-01-01 00:00:00-15:59'),
+    ('1403-01-01 12:00:00+00'), ('1403-01-02 00:00:00+00'), ('3177-12-29 07:59:59.999999+00'),
+    ('infinity')) t(x);
+UPDATE jt_cx_tz SET c = v::timestamptz;
+SELECT (SELECT count(*) FROM jt_cx_d) AS jdate_values,
+       (SELECT count(*) FROM jt_cx_ts) AS jtimestamp_values,
+       (SELECT count(*) FROM jt_cx_tz) AS jtimestamptz_values;
+ jdate_values | jtimestamp_values | jtimestamptz_values 
+--------------+-------------------+---------------------
+            9 |                13 |                  16
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- the matrix: every ordered pair, every operator and the cmp function, over
+-- all value pairs, per session zone. Per pair and zone:
+--   core_mism     operator result differs from core's operator on the core values
+--   epoch_mism    operator result differs from comparing the exact epoch numbers of
+--                 the two instants (a zone-free value sits on the time line in
+--                 the session zone, as core places it)
+--   algebra_mism  `=` and `<>`, `<` and `>=`, `<=` and `>` not exact opposites,
+--                 not exactly one of `<`, `=`, `>`, or the reversed pair disagrees
+--                 (the commutator: a < b is b > a, ...)
+--   cmp_mism      the cmp function is not -1, 0, 1 for less, equal, greater
+-- all of them must be 0; eq, lt and gt count the true results (so the rows are
+-- not vacuous) and sig is a hash of the whole result matrix.
+-- ---------------------------------------------------------------------
+CREATE FUNCTION jt_cx_matrix() RETURNS TABLE (zone text, pair text, pairs bigint, core_mism bigint,
+    epoch_mism bigint, algebra_mism bigint, cmp_mism bigint, eq bigint, lt bigint, gt bigint, sig text)
+LANGUAGE sql AS $$
+    SELECT current_setting('TimeZone'), 'jdate/jtimestamp', count(*),
+           count(*) FILTER (WHERE (a.v = b.v) <> (a.c = b.c) OR (a.v <> b.v) <> (a.c <> b.c)
+                               OR (a.v < b.v) <> (a.c < b.c) OR (a.v <= b.v) <> (a.c <= b.c)
+                               OR (a.v > b.v) <> (a.c > b.c) OR (a.v >= b.v) <> (a.c >= b.c)),
+           count(*) FILTER (WHERE (a.v = b.v) <> (k.ka = k.kb) OR (a.v <> b.v) <> (k.ka <> k.kb)
+                               OR (a.v < b.v) <> (k.ka < k.kb) OR (a.v <= b.v) <> (k.ka <= k.kb)
+                               OR (a.v > b.v) <> (k.ka > k.kb) OR (a.v >= b.v) <> (k.ka >= k.kb)),
+           count(*) FILTER (WHERE (a.v = b.v) = (a.v <> b.v) OR (a.v < b.v) = (a.v >= b.v)
+                               OR (a.v <= b.v) = (a.v > b.v)
+                               OR (a.v < b.v)::int + (a.v = b.v)::int + (a.v > b.v)::int <> 1
+                               OR (a.v = b.v) <> (b.v = a.v) OR (a.v <> b.v) <> (b.v <> a.v)
+                               OR (a.v < b.v) <> (b.v > a.v) OR (a.v <= b.v) <> (b.v >= a.v)
+                               OR (a.v > b.v) <> (b.v < a.v) OR (a.v >= b.v) <> (b.v <= a.v)),
+           count(*) FILTER (WHERE jdate_cmp_jtimestamp(a.v, b.v) <> CASE WHEN k.ka < k.kb THEN -1 WHEN k.ka > k.kb THEN 1 ELSE 0 END),
+           count(*) FILTER (WHERE a.v = b.v), count(*) FILTER (WHERE a.v < b.v), count(*) FILTER (WHERE a.v > b.v),
+           md5(string_agg((a.v < b.v)::int::text || (a.v = b.v)::int::text || (a.v > b.v)::int::text, ',' ORDER BY a.id, b.id))
+    FROM jt_cx_d a CROSS JOIN jt_cx_ts b
+         CROSS JOIN LATERAL (SELECT extract(epoch from a.c::timestamp) AS ka, extract(epoch from b.c) AS kb) k
+    UNION ALL
+    SELECT current_setting('TimeZone'), 'jtimestamp/jdate', count(*),
+           count(*) FILTER (WHERE (a.v = b.v) <> (a.c = b.c) OR (a.v <> b.v) <> (a.c <> b.c)
+                               OR (a.v < b.v) <> (a.c < b.c) OR (a.v <= b.v) <> (a.c <= b.c)
+                               OR (a.v > b.v) <> (a.c > b.c) OR (a.v >= b.v) <> (a.c >= b.c)),
+           count(*) FILTER (WHERE (a.v = b.v) <> (k.ka = k.kb) OR (a.v <> b.v) <> (k.ka <> k.kb)
+                               OR (a.v < b.v) <> (k.ka < k.kb) OR (a.v <= b.v) <> (k.ka <= k.kb)
+                               OR (a.v > b.v) <> (k.ka > k.kb) OR (a.v >= b.v) <> (k.ka >= k.kb)),
+           count(*) FILTER (WHERE (a.v = b.v) = (a.v <> b.v) OR (a.v < b.v) = (a.v >= b.v)
+                               OR (a.v <= b.v) = (a.v > b.v)
+                               OR (a.v < b.v)::int + (a.v = b.v)::int + (a.v > b.v)::int <> 1
+                               OR (a.v = b.v) <> (b.v = a.v) OR (a.v <> b.v) <> (b.v <> a.v)
+                               OR (a.v < b.v) <> (b.v > a.v) OR (a.v <= b.v) <> (b.v >= a.v)
+                               OR (a.v > b.v) <> (b.v < a.v) OR (a.v >= b.v) <> (b.v <= a.v)),
+           count(*) FILTER (WHERE jtimestamp_cmp_jdate(a.v, b.v) <> CASE WHEN k.ka < k.kb THEN -1 WHEN k.ka > k.kb THEN 1 ELSE 0 END),
+           count(*) FILTER (WHERE a.v = b.v), count(*) FILTER (WHERE a.v < b.v), count(*) FILTER (WHERE a.v > b.v),
+           md5(string_agg((a.v < b.v)::int::text || (a.v = b.v)::int::text || (a.v > b.v)::int::text, ',' ORDER BY a.id, b.id))
+    FROM jt_cx_ts a CROSS JOIN jt_cx_d b
+         CROSS JOIN LATERAL (SELECT extract(epoch from a.c) AS ka, extract(epoch from b.c::timestamp) AS kb) k
+    UNION ALL
+    SELECT current_setting('TimeZone'), 'jdate/jtimestamptz', count(*),
+           count(*) FILTER (WHERE (a.v = b.v) <> (a.c = b.c) OR (a.v <> b.v) <> (a.c <> b.c)
+                               OR (a.v < b.v) <> (a.c < b.c) OR (a.v <= b.v) <> (a.c <= b.c)
+                               OR (a.v > b.v) <> (a.c > b.c) OR (a.v >= b.v) <> (a.c >= b.c)),
+           count(*) FILTER (WHERE (a.v = b.v) <> (k.ka = k.kb) OR (a.v <> b.v) <> (k.ka <> k.kb)
+                               OR (a.v < b.v) <> (k.ka < k.kb) OR (a.v <= b.v) <> (k.ka <= k.kb)
+                               OR (a.v > b.v) <> (k.ka > k.kb) OR (a.v >= b.v) <> (k.ka >= k.kb)),
+           count(*) FILTER (WHERE (a.v = b.v) = (a.v <> b.v) OR (a.v < b.v) = (a.v >= b.v)
+                               OR (a.v <= b.v) = (a.v > b.v)
+                               OR (a.v < b.v)::int + (a.v = b.v)::int + (a.v > b.v)::int <> 1
+                               OR (a.v = b.v) <> (b.v = a.v) OR (a.v <> b.v) <> (b.v <> a.v)
+                               OR (a.v < b.v) <> (b.v > a.v) OR (a.v <= b.v) <> (b.v >= a.v)
+                               OR (a.v > b.v) <> (b.v < a.v) OR (a.v >= b.v) <> (b.v <= a.v)),
+           count(*) FILTER (WHERE jdate_cmp_jtimestamptz(a.v, b.v) <> CASE WHEN k.ka < k.kb THEN -1 WHEN k.ka > k.kb THEN 1 ELSE 0 END),
+           count(*) FILTER (WHERE a.v = b.v), count(*) FILTER (WHERE a.v < b.v), count(*) FILTER (WHERE a.v > b.v),
+           md5(string_agg((a.v < b.v)::int::text || (a.v = b.v)::int::text || (a.v > b.v)::int::text, ',' ORDER BY a.id, b.id))
+    FROM jt_cx_d a CROSS JOIN jt_cx_tz b
+         CROSS JOIN LATERAL (SELECT extract(epoch from a.c::timestamptz) AS ka, extract(epoch from b.c) AS kb) k
+    UNION ALL
+    SELECT current_setting('TimeZone'), 'jtimestamptz/jdate', count(*),
+           count(*) FILTER (WHERE (a.v = b.v) <> (a.c = b.c) OR (a.v <> b.v) <> (a.c <> b.c)
+                               OR (a.v < b.v) <> (a.c < b.c) OR (a.v <= b.v) <> (a.c <= b.c)
+                               OR (a.v > b.v) <> (a.c > b.c) OR (a.v >= b.v) <> (a.c >= b.c)),
+           count(*) FILTER (WHERE (a.v = b.v) <> (k.ka = k.kb) OR (a.v <> b.v) <> (k.ka <> k.kb)
+                               OR (a.v < b.v) <> (k.ka < k.kb) OR (a.v <= b.v) <> (k.ka <= k.kb)
+                               OR (a.v > b.v) <> (k.ka > k.kb) OR (a.v >= b.v) <> (k.ka >= k.kb)),
+           count(*) FILTER (WHERE (a.v = b.v) = (a.v <> b.v) OR (a.v < b.v) = (a.v >= b.v)
+                               OR (a.v <= b.v) = (a.v > b.v)
+                               OR (a.v < b.v)::int + (a.v = b.v)::int + (a.v > b.v)::int <> 1
+                               OR (a.v = b.v) <> (b.v = a.v) OR (a.v <> b.v) <> (b.v <> a.v)
+                               OR (a.v < b.v) <> (b.v > a.v) OR (a.v <= b.v) <> (b.v >= a.v)
+                               OR (a.v > b.v) <> (b.v < a.v) OR (a.v >= b.v) <> (b.v <= a.v)),
+           count(*) FILTER (WHERE jtimestamptz_cmp_jdate(a.v, b.v) <> CASE WHEN k.ka < k.kb THEN -1 WHEN k.ka > k.kb THEN 1 ELSE 0 END),
+           count(*) FILTER (WHERE a.v = b.v), count(*) FILTER (WHERE a.v < b.v), count(*) FILTER (WHERE a.v > b.v),
+           md5(string_agg((a.v < b.v)::int::text || (a.v = b.v)::int::text || (a.v > b.v)::int::text, ',' ORDER BY a.id, b.id))
+    FROM jt_cx_tz a CROSS JOIN jt_cx_d b
+         CROSS JOIN LATERAL (SELECT extract(epoch from a.c) AS ka, extract(epoch from b.c::timestamptz) AS kb) k
+    UNION ALL
+    SELECT current_setting('TimeZone'), 'jtimestamp/jtimestamptz', count(*),
+           count(*) FILTER (WHERE (a.v = b.v) <> (a.c = b.c) OR (a.v <> b.v) <> (a.c <> b.c)
+                               OR (a.v < b.v) <> (a.c < b.c) OR (a.v <= b.v) <> (a.c <= b.c)
+                               OR (a.v > b.v) <> (a.c > b.c) OR (a.v >= b.v) <> (a.c >= b.c)),
+           count(*) FILTER (WHERE (a.v = b.v) <> (k.ka = k.kb) OR (a.v <> b.v) <> (k.ka <> k.kb)
+                               OR (a.v < b.v) <> (k.ka < k.kb) OR (a.v <= b.v) <> (k.ka <= k.kb)
+                               OR (a.v > b.v) <> (k.ka > k.kb) OR (a.v >= b.v) <> (k.ka >= k.kb)),
+           count(*) FILTER (WHERE (a.v = b.v) = (a.v <> b.v) OR (a.v < b.v) = (a.v >= b.v)
+                               OR (a.v <= b.v) = (a.v > b.v)
+                               OR (a.v < b.v)::int + (a.v = b.v)::int + (a.v > b.v)::int <> 1
+                               OR (a.v = b.v) <> (b.v = a.v) OR (a.v <> b.v) <> (b.v <> a.v)
+                               OR (a.v < b.v) <> (b.v > a.v) OR (a.v <= b.v) <> (b.v >= a.v)
+                               OR (a.v > b.v) <> (b.v < a.v) OR (a.v >= b.v) <> (b.v <= a.v)),
+           count(*) FILTER (WHERE jtimestamp_cmp_jtimestamptz(a.v, b.v) <> CASE WHEN k.ka < k.kb THEN -1 WHEN k.ka > k.kb THEN 1 ELSE 0 END),
+           count(*) FILTER (WHERE a.v = b.v), count(*) FILTER (WHERE a.v < b.v), count(*) FILTER (WHERE a.v > b.v),
+           md5(string_agg((a.v < b.v)::int::text || (a.v = b.v)::int::text || (a.v > b.v)::int::text, ',' ORDER BY a.id, b.id))
+    FROM jt_cx_ts a CROSS JOIN jt_cx_tz b
+         CROSS JOIN LATERAL (SELECT extract(epoch from a.c::timestamptz) AS ka, extract(epoch from b.c) AS kb) k
+    UNION ALL
+    SELECT current_setting('TimeZone'), 'jtimestamptz/jtimestamp', count(*),
+           count(*) FILTER (WHERE (a.v = b.v) <> (a.c = b.c) OR (a.v <> b.v) <> (a.c <> b.c)
+                               OR (a.v < b.v) <> (a.c < b.c) OR (a.v <= b.v) <> (a.c <= b.c)
+                               OR (a.v > b.v) <> (a.c > b.c) OR (a.v >= b.v) <> (a.c >= b.c)),
+           count(*) FILTER (WHERE (a.v = b.v) <> (k.ka = k.kb) OR (a.v <> b.v) <> (k.ka <> k.kb)
+                               OR (a.v < b.v) <> (k.ka < k.kb) OR (a.v <= b.v) <> (k.ka <= k.kb)
+                               OR (a.v > b.v) <> (k.ka > k.kb) OR (a.v >= b.v) <> (k.ka >= k.kb)),
+           count(*) FILTER (WHERE (a.v = b.v) = (a.v <> b.v) OR (a.v < b.v) = (a.v >= b.v)
+                               OR (a.v <= b.v) = (a.v > b.v)
+                               OR (a.v < b.v)::int + (a.v = b.v)::int + (a.v > b.v)::int <> 1
+                               OR (a.v = b.v) <> (b.v = a.v) OR (a.v <> b.v) <> (b.v <> a.v)
+                               OR (a.v < b.v) <> (b.v > a.v) OR (a.v <= b.v) <> (b.v >= a.v)
+                               OR (a.v > b.v) <> (b.v < a.v) OR (a.v >= b.v) <> (b.v <= a.v)),
+           count(*) FILTER (WHERE jtimestamptz_cmp_jtimestamp(a.v, b.v) <> CASE WHEN k.ka < k.kb THEN -1 WHEN k.ka > k.kb THEN 1 ELSE 0 END),
+           count(*) FILTER (WHERE a.v = b.v), count(*) FILTER (WHERE a.v < b.v), count(*) FILTER (WHERE a.v > b.v),
+           md5(string_agg((a.v < b.v)::int::text || (a.v = b.v)::int::text || (a.v > b.v)::int::text, ',' ORDER BY a.id, b.id))
+    FROM jt_cx_tz a CROSS JOIN jt_cx_ts b
+         CROSS JOIN LATERAL (SELECT extract(epoch from a.c) AS ka, extract(epoch from b.c::timestamptz) AS kb) k
+$$;
+CREATE TEMP TABLE jt_cx_res (zone_no int, zone text, pair text, pairs bigint, core_mism bigint,
+    epoch_mism bigint, algebra_mism bigint, cmp_mism bigint, eq bigint, lt bigint, gt bigint, sig text);
+SET timezone = 'UTC';
+INSERT INTO jt_cx_res SELECT 1, * FROM jt_cx_matrix();
+SET timezone = 'Asia/Tehran';
+INSERT INTO jt_cx_res SELECT 2, * FROM jt_cx_matrix();
+SET timezone = 'America/New_York';
+INSERT INTO jt_cx_res SELECT 3, * FROM jt_cx_matrix();
+SET timezone = 'Pacific/Kiritimati';
+INSERT INTO jt_cx_res SELECT 4, * FROM jt_cx_matrix();
+SET timezone = 'Pacific/Pago_Pago';
+INSERT INTO jt_cx_res SELECT 5, * FROM jt_cx_matrix();
+SET timezone = '<+15:59>-15:59';
+INSERT INTO jt_cx_res SELECT 6, * FROM jt_cx_matrix();
+SET timezone = '<-15:59>+15:59';
+INSERT INTO jt_cx_res SELECT 7, * FROM jt_cx_matrix();
+SET timezone = 'UTC';
+-- (eq is the number of equal pairs: modern local midnights and the infinities,
+-- so it does not depend on the tz database; the numbers of less and greater pairs
+-- do for the named zones, where the year 560 has a local mean time, so they are
+-- printed below only for the zones without one)
+SELECT zone, pair, pairs, core_mism, epoch_mism, algebra_mism, cmp_mism, eq,
+       lt > 0 AND gt > 0 AS both_orders
+FROM jt_cx_res ORDER BY zone_no, pair COLLATE "C";
+        zone        |          pair           | pairs | core_mism | epoch_mism | algebra_mism | cmp_mism | eq | both_orders 
+--------------------+-------------------------+-------+-----------+------------+--------------+----------+----+-------------
+ UTC                | jdate/jtimestamp        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ UTC                | jdate/jtimestamptz      |   144 |         0 |          0 |            0 |        0 |  4 | t
+ UTC                | jtimestamp/jdate        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ UTC                | jtimestamp/jtimestamptz |   208 |         0 |          0 |            0 |        0 |  7 | t
+ UTC                | jtimestamptz/jdate      |   144 |         0 |          0 |            0 |        0 |  4 | t
+ UTC                | jtimestamptz/jtimestamp |   208 |         0 |          0 |            0 |        0 |  7 | t
+ Asia/Tehran        | jdate/jtimestamp        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ Asia/Tehran        | jdate/jtimestamptz      |   144 |         0 |          0 |            0 |        0 |  3 | t
+ Asia/Tehran        | jtimestamp/jdate        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ Asia/Tehran        | jtimestamp/jtimestamptz |   208 |         0 |          0 |            0 |        0 |  3 | t
+ Asia/Tehran        | jtimestamptz/jdate      |   144 |         0 |          0 |            0 |        0 |  3 | t
+ Asia/Tehran        | jtimestamptz/jtimestamp |   208 |         0 |          0 |            0 |        0 |  3 | t
+ America/New_York   | jdate/jtimestamp        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ America/New_York   | jdate/jtimestamptz      |   144 |         0 |          0 |            0 |        0 |  3 | t
+ America/New_York   | jtimestamp/jdate        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ America/New_York   | jtimestamp/jtimestamptz |   208 |         0 |          0 |            0 |        0 |  3 | t
+ America/New_York   | jtimestamptz/jdate      |   144 |         0 |          0 |            0 |        0 |  3 | t
+ America/New_York   | jtimestamptz/jtimestamp |   208 |         0 |          0 |            0 |        0 |  3 | t
+ Pacific/Kiritimati | jdate/jtimestamp        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ Pacific/Kiritimati | jdate/jtimestamptz      |   144 |         0 |          0 |            0 |        0 |  3 | t
+ Pacific/Kiritimati | jtimestamp/jdate        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ Pacific/Kiritimati | jtimestamp/jtimestamptz |   208 |         0 |          0 |            0 |        0 |  3 | t
+ Pacific/Kiritimati | jtimestamptz/jdate      |   144 |         0 |          0 |            0 |        0 |  3 | t
+ Pacific/Kiritimati | jtimestamptz/jtimestamp |   208 |         0 |          0 |            0 |        0 |  3 | t
+ Pacific/Pago_Pago  | jdate/jtimestamp        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ Pacific/Pago_Pago  | jdate/jtimestamptz      |   144 |         0 |          0 |            0 |        0 |  3 | t
+ Pacific/Pago_Pago  | jtimestamp/jdate        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ Pacific/Pago_Pago  | jtimestamp/jtimestamptz |   208 |         0 |          0 |            0 |        0 |  3 | t
+ Pacific/Pago_Pago  | jtimestamptz/jdate      |   144 |         0 |          0 |            0 |        0 |  3 | t
+ Pacific/Pago_Pago  | jtimestamptz/jtimestamp |   208 |         0 |          0 |            0 |        0 |  3 | t
+ <+15:59>-15:59     | jdate/jtimestamp        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ <+15:59>-15:59     | jdate/jtimestamptz      |   144 |         0 |          0 |            0 |        0 |  3 | t
+ <+15:59>-15:59     | jtimestamp/jdate        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ <+15:59>-15:59     | jtimestamp/jtimestamptz |   208 |         0 |          0 |            0 |        0 |  3 | t
+ <+15:59>-15:59     | jtimestamptz/jdate      |   144 |         0 |          0 |            0 |        0 |  3 | t
+ <+15:59>-15:59     | jtimestamptz/jtimestamp |   208 |         0 |          0 |            0 |        0 |  3 | t
+ <-15:59>+15:59     | jdate/jtimestamp        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ <-15:59>+15:59     | jdate/jtimestamptz      |   144 |         0 |          0 |            0 |        0 |  3 | t
+ <-15:59>+15:59     | jtimestamp/jdate        |   117 |         0 |          0 |            0 |        0 |  7 | t
+ <-15:59>+15:59     | jtimestamp/jtimestamptz |   208 |         0 |          0 |            0 |        0 |  3 | t
+ <-15:59>+15:59     | jtimestamptz/jdate      |   144 |         0 |          0 |            0 |        0 |  3 | t
+ <-15:59>+15:59     | jtimestamptz/jtimestamp |   208 |         0 |          0 |            0 |        0 |  3 | t
+(42 rows)
+
+SELECT zone, pair, lt, gt
+FROM jt_cx_res WHERE zone_no IN (1, 6, 7) ORDER BY zone_no, pair COLLATE "C";
+      zone      |          pair           | lt  | gt  
+----------------+-------------------------+-----+-----
+ UTC            | jdate/jtimestamp        |  58 |  52
+ UTC            | jdate/jtimestamptz      |  70 |  70
+ UTC            | jtimestamp/jdate        |  52 |  58
+ UTC            | jtimestamp/jtimestamptz |  93 | 108
+ UTC            | jtimestamptz/jdate      |  70 |  70
+ UTC            | jtimestamptz/jtimestamp | 108 |  93
+ <+15:59>-15:59 | jdate/jtimestamp        |  58 |  52
+ <+15:59>-15:59 | jdate/jtimestamptz      |  80 |  61
+ <+15:59>-15:59 | jtimestamp/jdate        |  52 |  58
+ <+15:59>-15:59 | jtimestamp/jtimestamptz | 119 |  86
+ <+15:59>-15:59 | jtimestamptz/jdate      |  61 |  80
+ <+15:59>-15:59 | jtimestamptz/jtimestamp |  86 | 119
+ <-15:59>+15:59 | jdate/jtimestamp        |  58 |  52
+ <-15:59>+15:59 | jdate/jtimestamptz      |  62 |  79
+ <-15:59>+15:59 | jtimestamp/jdate        |  52 |  58
+ <-15:59>+15:59 | jtimestamp/jtimestamptz |  75 | 130
+ <-15:59>+15:59 | jtimestamptz/jdate      |  79 |  62
+ <-15:59>+15:59 | jtimestamptz/jtimestamp | 130 |  75
+(18 rows)
+
+-- all mismatch counts are zero everywhere
+SELECT count(*) AS rows, sum(pairs) AS value_pairs,
+       sum(core_mism) AS core_mism, sum(epoch_mism) AS epoch_mism,
+       sum(algebra_mism) AS algebra_mism, sum(cmp_mism) AS cmp_mism
+FROM jt_cx_res;
+ rows | value_pairs | core_mism | epoch_mism | algebra_mism | cmp_mism 
+------+-------------+-----------+------------+--------------+----------
+   42 |        6566 |         0 |          0 |            0 |        0
+(1 row)
+
+-- jdate against jtimestamp reads no zone (IMMUTABLE): the result is the same
+-- in all seven zones. The pairs with jtimestamptz do read it: the results
+-- differ between zones.
+SELECT pair,
+       count(DISTINCT sig) = 1 AS same_in_every_zone,
+       count(DISTINCT sig) > 1 AS differs_between_zones
+FROM jt_cx_res GROUP BY pair ORDER BY pair COLLATE "C";
+          pair           | same_in_every_zone | differs_between_zones 
+-------------------------+--------------------+-----------------------
+ jdate/jtimestamp        | t                  | f
+ jdate/jtimestamptz      | f                  | t
+ jtimestamp/jdate        | t                  | f
+ jtimestamp/jtimestamptz | f                  | t
+ jtimestamptz/jdate      | f                  | t
+ jtimestamptz/jtimestamp | f                  | t
+(6 rows)
+
+-- the pairs that are equal depend on the zone: the local midnight of 1403-01-01
+-- as a jdate equals the jtimestamptz written with that zone's offset (and so
+-- does 1403-01-02 in UTC, where such a value exists)
+SELECT zone_no, zone, eq AS jdate_eq_jtimestamptz
+FROM jt_cx_res WHERE pair = 'jdate/jtimestamptz' ORDER BY zone_no;
+ zone_no |        zone        | jdate_eq_jtimestamptz 
+---------+--------------------+-----------------------
+       1 | UTC                |                     4
+       2 | Asia/Tehran        |                     3
+       3 | America/New_York   |                     3
+       4 | Pacific/Kiritimati |                     3
+       5 | Pacific/Pago_Pago  |                     3
+       6 | <+15:59>-15:59     |                     3
+       7 | <-15:59>+15:59     |                     3
+(7 rows)
+
+-- controls: the oracles can fail. The wrong operator against core's result and
+-- against the epoch numbers shows mismatches, and a different zone on one side
+-- of the epoch comparison does too
+SELECT count(*) FILTER (WHERE (a.v < b.v) <> (a.c > b.c)) > 0 AS core_control_detects,
+       count(*) FILTER (WHERE (a.v = b.v) <> (extract(epoch from a.c::timestamp) <> extract(epoch from b.c))) > 0
+         AS epoch_control_detects
+FROM jt_cx_d a CROSS JOIN jt_cx_ts b;
+ core_control_detects | epoch_control_detects 
+----------------------+-----------------------
+ t                    | t
+(1 row)
+
+SELECT count(*) FILTER (WHERE (a.v = b.v) <>
+           (extract(epoch from a.c::timestamptz AT TIME ZONE 'Asia/Tehran' AT TIME ZONE 'UTC') = extract(epoch from b.c)))
+         > 0 AS zone_control_detects
+FROM jt_cx_d a CROSS JOIN jt_cx_tz b;
+ zone_control_detects 
+----------------------
+ t
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- NULL operands: every operator and the cmp function is STRICT
+-- ---------------------------------------------------------------------
+SELECT (NULL::jdate = '1403-01-01'::jtimestamp) IS NULL AS d_ts,
+       ('1403-01-01'::jtimestamp < NULL::jdate) IS NULL AS ts_d,
+       (NULL::jdate >= '1403-01-01 00:00:00+00'::jtimestamptz) IS NULL AS d_tz,
+       ('1403-01-01 00:00:00+00'::jtimestamptz <> NULL::jdate) IS NULL AS tz_d,
+       (NULL::jtimestamp > '1403-01-01 00:00:00+00'::jtimestamptz) IS NULL AS ts_tz,
+       ('1403-01-01 00:00:00+00'::jtimestamptz <= NULL::jtimestamp) IS NULL AS tz_ts,
+       jdate_cmp_jtimestamp(NULL, '1403-01-01') IS NULL AS cmp_null;
+ d_ts | ts_d | d_tz | tz_d | ts_tz | tz_ts | cmp_null 
+------+------+------+------+-------+-------+----------
+ t    | t    | t    | t    | t     | t     | t
+(1 row)
+
+-- typmod values compare on what is stored
+SELECT '1403-01-01 00:00:00.123456'::jtimestamp(3) = '1403-01-01 00:00:00.123'::jtimestamp AS ts_typmod_rounded,
+       '1403-01-01 00:00:00.5+00'::jtimestamptz(0) > '1403-01-01'::jdate AS tz_typmod_rounded_up,
+       '1403-01-01 00:00:00.4+00'::jtimestamptz(0) = '1403-01-01'::jdate AS tz_typmod_rounded_down;
+ ts_typmod_rounded | tz_typmod_rounded_up | tz_typmod_rounded_down 
+-------------------+----------------------+------------------------
+ t                 | t                    | t
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- merge joins across the types. `=` is MERGES: with hash joins and nested
+-- loops switched off the planner must still use a merge join, and the answer
+-- must be the one core's operator gives on the core values. 400 days as jdate,
+-- jtimestamp at 00:00, 08:00 and 16:00 of each of them, and jtimestamptz every
+-- 30 minutes of the first 100 days.
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE jt_cx_j_d AS
+SELECT g AS id, (DATE '2024-03-20' + g)::jdate AS v, DATE '2024-03-20' + g AS c
+FROM generate_series(0, 399) g;
+CREATE TEMP TABLE jt_cx_j_ts AS
+SELECT g AS id, t::jtimestamp AS v, t AS c
+FROM (SELECT g, TIMESTAMP '2024-03-20 00:00:00' + g * interval '8 hours' AS t FROM generate_series(0, 1199) g) s;
+CREATE TEMP TABLE jt_cx_j_tz AS
+SELECT g AS id, t::jtimestamptz AS v, t AS c
+FROM (SELECT g, TIMESTAMPTZ '2024-03-20 00:00:00+00' + g * interval '30 minutes' AS t FROM generate_series(0, 4799) g) s;
+ANALYZE jt_cx_j_d;
+ANALYZE jt_cx_j_ts;
+ANALYZE jt_cx_j_tz;
+-- one join per ordered pair of the tables whose ids are below lim: whether the
+-- plan uses a merge join or a hash join, the number of rows, the oracle's number
+-- of rows (core's operator on the core values) and whether the two results
+-- are the same set of (left id, right id) pairs
+CREATE FUNCTION jt_cx_join(l text, r text, lim int, OUT merge_join boolean, OUT hash_join boolean,
+                           OUT join_rows bigint, OUT oracle_rows bigint, OUT same_rows boolean)
+LANGUAGE plpgsql AS $$
+DECLARE
+    q text := format('SELECT a.id AS aid, b.id AS bid FROM jt_cx_j_%s a JOIN jt_cx_j_%s b ON a.v = b.v WHERE a.id < %s AND b.id < %s', l, r, lim, lim);
+    oq text := format('SELECT a.id AS aid, b.id AS bid FROM jt_cx_j_%s a JOIN jt_cx_j_%s b ON a.c = b.c WHERE a.id < %s AND b.id < %s', l, r, lim, lim);
+BEGIN
+    SELECT bool_or(x ~ '^Merge Join'), bool_or(x ~ '^Hash Join') INTO merge_join, hash_join
+    FROM jt_cx_plan(q) x;
+    EXECUTE format('SELECT count(*), (SELECT count(*) FROM (%s) o),
+                    NOT EXISTS ((SELECT aid, bid FROM (%s) s EXCEPT SELECT aid, bid FROM (%s) o)
+                                UNION ALL (SELECT aid, bid FROM (%s) o EXCEPT SELECT aid, bid FROM (%s) s))
+                    FROM (%s) s', oq, q, oq, oq, q, q)
+        INTO join_rows, oracle_rows, same_rows;
+END
+$$;
+SET enable_hashjoin = off;
+SET enable_nestloop = off;
+SELECT l || '/' || r AS pair, j.merge_join, j.hash_join, j.join_rows, j.oracle_rows, j.same_rows
+FROM (VALUES (1, 'd', 'ts'), (2, 'ts', 'd'), (3, 'd', 'tz'), (4, 'tz', 'd'), (5, 'ts', 'tz'), (6, 'tz', 'ts')) v(n, l, r),
+     LATERAL jt_cx_join(l, r, 100000) j
+ORDER BY v.n;
+ pair  | merge_join | hash_join | join_rows | oracle_rows | same_rows 
+-------+------------+-----------+-----------+-------------+-----------
+ d/ts  | t          | f         |       400 |         400 | t
+ ts/d  | t          | f         |       400 |         400 | t
+ d/tz  | t          | f         |       100 |         100 | t
+ tz/d  | t          | f         |       100 |         100 | t
+ ts/tz | t          | f         |       300 |         300 | t
+ tz/ts | t          | f         |       300 |         300 | t
+(6 rows)
+
+RESET enable_hashjoin;
+RESET enable_nestloop;
+-- the same joins under the offset of Tehran (+03:30, as a fixed zone): the
+-- zone-dependent pairs join other rows (a local midnight is another instant),
+-- still the oracle's
+SET timezone = '<+03:30>-03:30';
+SET enable_hashjoin = off;
+SET enable_nestloop = off;
+SELECT l || '/' || r AS pair, j.merge_join, j.join_rows, j.oracle_rows, j.same_rows
+FROM (VALUES (1, 'd', 'tz'), (2, 'tz', 'd'), (3, 'ts', 'tz'), (4, 'tz', 'ts')) v(n, l, r),
+     LATERAL jt_cx_join(l, r, 100000) j
+ORDER BY v.n;
+ pair  | merge_join | join_rows | oracle_rows | same_rows 
+-------+------------+-----------+-------------+-----------
+ d/tz  | t          |       100 |         100 | t
+ tz/d  | t          |       100 |         100 | t
+ ts/tz | t          |       300 |         300 | t
+ tz/ts | t          |       300 |         300 | t
+(4 rows)
+
+RESET enable_hashjoin;
+RESET enable_nestloop;
+SET timezone = 'UTC';
+-- no hash join exists for these `=` (core has no cross-type hash either): with
+-- merge joins and nested loops switched off the planner does not fail and does
+-- not choose a hash join; the rows are still the oracle's (only the first 120
+-- rows of each table: with a nested loop as the only way, the join is slow)
+SET enable_mergejoin = off;
+SET enable_nestloop = off;
+SELECT l || '/' || r AS pair, j.hash_join, j.join_rows, j.oracle_rows, j.same_rows
+FROM (VALUES (1, 'd', 'ts'), (2, 'ts', 'd'), (3, 'd', 'tz'), (4, 'tz', 'd'), (5, 'ts', 'tz'), (6, 'tz', 'ts')) v(n, l, r),
+     LATERAL jt_cx_join(l, r, 120) j
+ORDER BY v.n;
+ pair  | hash_join | join_rows | oracle_rows | same_rows 
+-------+-----------+-----------+-------------+-----------
+ d/ts  | f         |        40 |          40 | t
+ ts/d  | f         |        40 |          40 | t
+ d/tz  | f         |         3 |           3 | t
+ tz/d  | f         |         3 |           3 | t
+ ts/tz | f         |         8 |           8 | t
+ tz/ts | f         |         8 |           8 | t
+(6 rows)
+
+RESET enable_mergejoin;
+RESET enable_nestloop;
+-- ---------------------------------------------------------------------
+-- index scans with a predicate of another type: an index on a column of one
+-- type serves `<`, `<=`, `>=`, `>` against a value of another type of the
+-- family, in either operand order. 20,000 rows per table with a btree index;
+-- the predicate selects a narrow range two days wide.
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE jt_cx_i_d AS
+SELECT g AS id, (DATE '2024-03-20' + g % 2000)::jdate AS v, DATE '2024-03-20' + g % 2000 AS c
+FROM generate_series(0, 19999) g;
+CREATE TEMP TABLE jt_cx_i_ts AS
+SELECT g AS id, t::jtimestamp AS v, t AS c
+FROM (SELECT g, TIMESTAMP '2024-03-20 00:00:00' + g * interval '10 minutes' AS t FROM generate_series(0, 19999) g) s;
+CREATE TEMP TABLE jt_cx_i_tz AS
+SELECT g AS id, t::jtimestamptz AS v, t AS c
+FROM (SELECT g, TIMESTAMPTZ '2024-03-20 00:00:00+00' + g * interval '10 minutes' AS t FROM generate_series(0, 19999) g) s;
+CREATE INDEX jt_cx_i_d_idx ON jt_cx_i_d (v);
+CREATE INDEX jt_cx_i_ts_idx ON jt_cx_i_ts (v);
+CREATE INDEX jt_cx_i_tz_idx ON jt_cx_i_tz (v);
+ANALYZE jt_cx_i_d;
+ANALYZE jt_cx_i_ts;
+ANALYZE jt_cx_i_tz;
+-- whether the plan of a statement uses the index (a bitmap scan counts), with
+-- sequential scans switched off for the function; the row count by that index
+-- plan and by a sequential scan
+CREATE FUNCTION jt_cx_index_plan(q text) RETURNS boolean
+LANGUAGE plpgsql SET enable_seqscan = off AS $$
+BEGIN
+    RETURN (SELECT bool_or(l ~ '^(Index (Only )?Scan using|Bitmap Index Scan on)') FROM jt_cx_plan(q) l);
+END
+$$;
+CREATE FUNCTION jt_cx_count_index(q text) RETURNS bigint
+LANGUAGE plpgsql SET enable_seqscan = off SET enable_bitmapscan = off AS $$
+DECLARE n bigint;
+BEGIN
+    EXECUTE q INTO n;
+    RETURN n;
+END
+$$;
+CREATE FUNCTION jt_cx_count_seq(q text) RETURNS bigint
+LANGUAGE plpgsql SET enable_indexscan = off SET enable_indexonlyscan = off SET enable_bitmapscan = off AS $$
+DECLARE n bigint;
+BEGIN
+    EXECUTE q INTO n;
+    RETURN n;
+END
+$$;
+-- t: the table (its column type is the left type), ctype: the type of the two
+-- constants, core: the core type of the oracle's constants. Form 1 puts the
+-- column on the left, form 2 the constant on the left (the commutated operator).
+SELECT t.tbl, t.ctype, t.form,
+       jt_cx_index_plan(q.q) AS index_usable,
+       jt_cx_count_index(q.q) AS index_rows,
+       jt_cx_count_seq(q.q) AS seq_rows,
+       jt_cx_count_seq(q.oq) AS core_rows
+FROM (VALUES
+    ('jt_cx_i_ts', 'jdate', 'date', 1, '1403-02-01', '1403-02-03'),
+    ('jt_cx_i_ts', 'jdate', 'date', 2, '1403-02-01', '1403-02-03'),
+    ('jt_cx_i_d', 'jtimestamp', 'timestamp', 1, '1403-02-01 00:00:00', '1403-02-03 00:00:00'),
+    ('jt_cx_i_d', 'jtimestamp', 'timestamp', 2, '1403-02-01 00:00:00', '1403-02-03 00:00:00'),
+    ('jt_cx_i_d', 'jtimestamptz', 'timestamptz', 1, '1403-02-01 00:00:00+00', '1403-02-03 00:00:00+00'),
+    ('jt_cx_i_d', 'jtimestamptz', 'timestamptz', 2, '1403-02-01 00:00:00+00', '1403-02-03 00:00:00+00'),
+    ('jt_cx_i_tz', 'jdate', 'date', 1, '1403-02-01', '1403-02-03'),
+    ('jt_cx_i_tz', 'jdate', 'date', 2, '1403-02-01', '1403-02-03'),
+    ('jt_cx_i_tz', 'jtimestamp', 'timestamp', 1, '1403-02-01 00:00:00', '1403-02-03 00:00:00'),
+    ('jt_cx_i_tz', 'jtimestamp', 'timestamp', 2, '1403-02-01 00:00:00', '1403-02-03 00:00:00'),
+    ('jt_cx_i_ts', 'jtimestamptz', 'timestamptz', 1, '1403-02-01 00:00:00+00', '1403-02-03 00:00:00+00'),
+    ('jt_cx_i_ts', 'jtimestamptz', 'timestamptz', 2, '1403-02-01 00:00:00+00', '1403-02-03 00:00:00+00')
+  ) t(tbl, ctype, core, form, lo, hi),
+  LATERAL (SELECT
+      CASE t.form
+        WHEN 1 THEN format('SELECT count(*) FROM %s WHERE v >= %L::%s AND v < %L::%s', t.tbl, t.lo, t.ctype, t.hi, t.ctype)
+        ELSE format('SELECT count(*) FROM %s WHERE %L::%s <= v AND %L::%s > v', t.tbl, t.lo, t.ctype, t.hi, t.ctype)
+      END AS q,
+      CASE t.form
+        WHEN 1 THEN format('SELECT count(*) FROM %s WHERE c >= %L::%s::%s AND c < %L::%s::%s', t.tbl, t.lo, t.ctype, t.core, t.hi, t.ctype, t.core)
+        ELSE format('SELECT count(*) FROM %s WHERE %L::%s::%s <= c AND %L::%s::%s > c', t.tbl, t.lo, t.ctype, t.core, t.hi, t.ctype, t.core)
+      END AS oq) q
+ORDER BY t.tbl COLLATE "C", t.ctype COLLATE "C", t.form;
+    tbl     |    ctype     | form | index_usable | index_rows | seq_rows | core_rows 
+------------+--------------+------+--------------+------------+----------+-----------
+ jt_cx_i_d  | jtimestamp   |    1 | t            |         20 |       20 |        20
+ jt_cx_i_d  | jtimestamp   |    2 | t            |         20 |       20 |        20
+ jt_cx_i_d  | jtimestamptz |    1 | t            |         20 |       20 |        20
+ jt_cx_i_d  | jtimestamptz |    2 | t            |         20 |       20 |        20
+ jt_cx_i_ts | jdate        |    1 | t            |        288 |      288 |       288
+ jt_cx_i_ts | jdate        |    2 | t            |        288 |      288 |       288
+ jt_cx_i_ts | jtimestamptz |    1 | t            |        288 |      288 |       288
+ jt_cx_i_ts | jtimestamptz |    2 | t            |        288 |      288 |       288
+ jt_cx_i_tz | jdate        |    1 | t            |        288 |      288 |       288
+ jt_cx_i_tz | jdate        |    2 | t            |        288 |      288 |       288
+ jt_cx_i_tz | jtimestamp   |    1 | t            |        288 |      288 |       288
+ jt_cx_i_tz | jtimestamp   |    2 | t            |        288 |      288 |       288
+(12 rows)
+
+-- BETWEEN and equality probes work across the types too, also against the
+-- zone of the session
+SELECT count(*) AS between_rows,
+       count(*) FILTER (WHERE c BETWEEN DATE '2024-04-20' AND DATE '2024-04-21') AS core_rows
+FROM jt_cx_i_ts WHERE v BETWEEN '1403-02-01'::jdate AND '1403-02-02'::jdate;
+ between_rows | core_rows 
+--------------+-----------
+          145 |       145
+(1 row)
+
+SELECT count(*) AS equality_rows,
+       (SELECT count(*) FROM jt_cx_i_d WHERE c = TIMESTAMP '2024-04-20 00:00:00') AS core_rows
+FROM jt_cx_i_d WHERE v = '1403-02-01 00:00:00'::jtimestamp;
+ equality_rows | core_rows 
+---------------+-----------
+            10 |        10
+(1 row)
+
+SELECT count(*) AS equal_instants, min(id) AS first_id
+FROM jt_cx_i_ts WHERE v = '1403-01-01 00:00:00+00'::jtimestamptz;
+ equal_instants | first_id 
+----------------+----------
+              1 |        0
+(1 row)
+
+-- the same jtimestamptz is a different jtimestamp row in another zone: the
+-- wall clock that is that instant at +03:30 is 03:30 (row 21), the row of
+-- 00:00 is the instant written +03:30
+SET timezone = '<+03:30>-03:30';
+SELECT count(*) AS equal_instants, min(id) AS first_id
+FROM jt_cx_i_ts WHERE v = '1403-01-01 00:00:00+00'::jtimestamptz;
+ equal_instants | first_id 
+----------------+----------
+              1 |       21
+(1 row)
+
+SELECT count(*) AS equal_instants, min(id) AS first_id
+FROM jt_cx_i_ts WHERE v = '1403-01-01 00:00:00+03:30'::jtimestamptz;
+ equal_instants | first_id 
+----------------+----------
+              1 |        0
+(1 row)
+
+SET timezone = 'UTC';
+-- ---------------------------------------------------------------------
+-- what stays the same: a bare literal picks the same-type operator, and no
+-- operator mixes a Jalali type with a core type
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE jt_cx_r (d jdate, ts jtimestamp, tz jtimestamptz);
+CREATE TEMP VIEW jt_cx_rv AS
+SELECT d = '1403-01-01' AS a, '1403-01-01' = d AS b, d < '1403-01-01' AS c,
+       ts = '1403-01-01 10:00:00' AS e, '1403-01-01 10:00:00' <= ts AS f, ts >= '1403-01-01 10:00:00' AS g,
+       tz = '1403-01-01 10:00:00+00' AS h, '1403-01-01 10:00:00+00' > tz AS i, tz <> '1403-01-01 10:00:00+00' AS j,
+       d = NULL AS k, ts = NULL AS l, tz = NULL AS m
+FROM jt_cx_r;
+-- the operators the view uses: all same-type
+SELECT s.operator
+FROM (SELECT DISTINCT o.oid::regoperator::text AS operator
+      FROM pg_rewrite r
+      JOIN pg_depend dep ON dep.classid = 'pg_rewrite'::regclass AND dep.objid = r.oid
+                        AND dep.refclassid = 'pg_operator'::regclass
+      JOIN pg_operator o ON o.oid = dep.refobjid
+      WHERE r.ev_class = 'jt_cx_rv'::regclass) s
+ORDER BY s.operator COLLATE "C";
+           operator            
+-------------------------------
+ <(jdate,jdate)
+ <=(jtimestamp,jtimestamp)
+ <>(jtimestamptz,jtimestamptz)
+ =(jdate,jdate)
+ =(jtimestamp,jtimestamp)
+ =(jtimestamptz,jtimestamptz)
+ >(jtimestamptz,jtimestamptz)
+ >=(jtimestamp,jtimestamp)
+(8 rows)
+
+SELECT count(*) FILTER (WHERE o.oprleft <> o.oprright) AS cross_type_operators_used
+FROM pg_rewrite r
+JOIN pg_depend dep ON dep.classid = 'pg_rewrite'::regclass AND dep.objid = r.oid
+                  AND dep.refclassid = 'pg_operator'::regclass
+JOIN pg_operator o ON o.oid = dep.refobjid
+WHERE r.ev_class = 'jt_cx_rv'::regclass;
+ cross_type_operators_used 
+---------------------------
+                         0
+(1 row)
+
+-- none against the core types, in either order (SQLSTATE 42883)
+SELECT '1403-01-01'::jdate = date '2024-03-20';
+ERROR:  42883
+SELECT date '2024-03-20' = '1403-01-01'::jdate;
+ERROR:  42883
+SELECT '1403-01-01'::jdate < timestamp '2024-03-20 00:00:00';
+ERROR:  42883
+SELECT timestamp '2024-03-20 00:00:00' < '1403-01-01'::jdate;
+ERROR:  42883
+SELECT '1403-01-01'::jdate >= timestamptz '2024-03-20 00:00:00+00';
+ERROR:  42883
+SELECT timestamptz '2024-03-20 00:00:00+00' >= '1403-01-01'::jdate;
+ERROR:  42883
+SELECT '1403-01-01 00:00:00'::jtimestamp = date '2024-03-20';
+ERROR:  42883
+SELECT date '2024-03-20' <> '1403-01-01 00:00:00'::jtimestamp;
+ERROR:  42883
+SELECT '1403-01-01 00:00:00'::jtimestamp > timestamptz '2024-03-20 00:00:00+00';
+ERROR:  42883
+SELECT timestamptz '2024-03-20 00:00:00+00' <= '1403-01-01 00:00:00'::jtimestamp;
+ERROR:  42883
+SELECT '1403-01-01 00:00:00+00'::jtimestamptz = date '2024-03-20';
+ERROR:  42883
+SELECT '1403-01-01 00:00:00+00'::jtimestamptz < timestamp '2024-03-20 00:00:00';
+ERROR:  42883
+SELECT timestamp '2024-03-20 00:00:00' > '1403-01-01 00:00:00+00'::jtimestamptz;
+ERROR:  42883
+-- and the core types still compare with each other as before
+SELECT date '2024-03-20' = timestamp '2024-03-20 00:00:00' AS core_date_timestamp,
+       timestamp '2024-03-20 00:00:00' = timestamptz '2024-03-20 00:00:00+00' AS core_timestamp_timestamptz;
+ core_date_timestamp | core_timestamp_timestamptz 
+---------------------+----------------------------
+ t                   | t
+(1 row)
+
+DROP VIEW jt_cx_rv;
+DROP FUNCTION jt_cx_join(text, text, int);
+DROP FUNCTION jt_cx_index_plan(text);
+DROP FUNCTION jt_cx_count_index(text);
+DROP FUNCTION jt_cx_count_seq(text);
+DROP FUNCTION jt_cx_matrix();
+DROP FUNCTION jt_cx_plan(text);
