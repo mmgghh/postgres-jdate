@@ -1,5 +1,8 @@
 -- Mixed workload: one transaction that writes (ledger kept in step) and then
 -- reads. One run in twenty also forces a parallel plan.
+-- The day offsets are cast to int: under -M extended and -M prepared pgbench sends
+-- them as untyped parameters, and jdate + $1 is ambiguous (42725) between the
+-- integer, interval and time forms of the operator.
 \set day random(0, 1183019)
 \set lo random(0, 1100000)
 \set hi least(:lo + 2000, 1183019)
@@ -9,12 +12,12 @@ SELECT set_config('TimeZone', (ARRAY['UTC', 'Asia/Tehran', 'America/New_York', '
 BEGIN;
 WITH i AS (
     INSERT INTO jd_stress (d, owner)
-    VALUES ('-0061-01-01'::jdate + :day, :client_id)
+    VALUES ('-0061-01-01'::jdate + :day::int, :client_id)
     RETURNING 1)
 UPDATE jd_ledger SET n = n + (SELECT count(*) FROM i) WHERE owner = :client_id;
 SELECT count(*), min(d), max(d) FROM jd_stress WHERE owner = :client_id;
 SELECT jdate_part('year', d), jdate_trunc('year', d), jdate_format(d::timestamptz)
-  FROM jd_stress WHERE owner = :client_id AND d BETWEEN '-0061-01-01'::jdate + :lo AND '-0061-01-01'::jdate + :hi LIMIT 20;
+  FROM jd_stress WHERE owner = :client_id AND d BETWEEN '-0061-01-01'::jdate + :lo::int AND '-0061-01-01'::jdate + :hi::int LIMIT 20;
 COMMIT;
 \if :par = 1
 BEGIN;

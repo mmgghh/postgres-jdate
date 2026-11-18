@@ -85,10 +85,23 @@ CREATE TABLE jd_ledger (owner int PRIMARY KEY, n bigint NOT NULL);
 INSERT INTO jd_ledger SELECT g, 0 FROM generate_series(0, 63) g;
 SQL
 
+# pgbench 17 and later can stop the whole run at the first aborted client
+# (--exit-on-abort). Without it a client that dies on an error is only counted
+# and the others keep going for the full -T seconds, so a script error would be
+# noticed late. pgbench 16 has no such option; the output check below still
+# catches the aborted clients there, after the run.
+PGBENCH_ABORT=()
+if "$PGBENCH" --help 2>&1 | grep -q -- '--exit-on-abort'; then
+	PGBENCH_ABORT=(--exit-on-abort)
+fi
+
 # Run pgbench in one protocol mode: $1 = simple|extended|prepared, $2 = seconds.
+# Under -M extended and -M prepared every :variable reaches the server as an
+# untyped parameter ($1), so the scripts in dev/pgbench cast the ones that sit
+# next to a jdate operator: jdate + $1 alone is ambiguous (42725).
 run_pgbench() {
 	local mode="$1" secs="$2" out="$WORK/pgbench-$1.log" rc
-	"$PGBENCH" -n -c "$CLIENTS" -j "$THREADS" -T "$secs" -M "$mode" \
+	"$PGBENCH" -n -c "$CLIENTS" -j "$THREADS" -T "$secs" -M "$mode" "${PGBENCH_ABORT[@]}" \
 		-f "$SCRIPTS/stress-write.sql@4" \
 		-f "$SCRIPTS/stress-read.sql@4" \
 		-f "$SCRIPTS/stress-mixed.sql@2" \

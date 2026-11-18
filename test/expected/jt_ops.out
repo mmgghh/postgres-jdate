@@ -964,9 +964,57 @@ FROM jt_ops_tz a CROSS JOIN jt_ops_tz b;
                          0 |                             0 |                         0
 (1 row)
 
+-- core's hash of a timestamptz, as the default hash opclass of timestamptz on THIS
+-- server computes it, so the check is the same on PostgreSQL 16, 17 and 18. The opclass
+-- names the function: PostgreSQL 18 has timestamptz_hash and timestamptz_hash_extended,
+-- before 18 the opclass uses timestamp_hash and timestamp_hash_extended on the same
+-- eight bytes (they take a timestamp, so the instant goes in as its UTC wall clock,
+-- which is the same microsecond count). seed NULL is the plain hash (support
+-- function 1), otherwise the seeded one (support function 2).
+CREATE FUNCTION pg_temp.core_tz_hash(v timestamptz, seed bigint DEFAULT NULL) RETURNS bigint
+LANGUAGE plpgsql AS $$
+DECLARE
+    fn regproc;
+    argtype oid;
+    r bigint;
+BEGIN
+    SELECT p.amproc, pr.proargtypes[0] INTO STRICT fn, argtype
+    FROM pg_opclass c
+         JOIN pg_am a ON a.oid = c.opcmethod
+         JOIN pg_amproc p ON p.amprocfamily = c.opcfamily
+                         AND p.amproclefttype = c.opcintype AND p.amprocrighttype = c.opcintype
+         JOIN pg_proc pr ON pr.oid = p.amproc
+    WHERE a.amname = 'hash' AND c.opcintype = 'timestamptz'::regtype AND c.opcdefault
+      AND p.amprocnum = CASE WHEN seed IS NULL THEN 1 ELSE 2 END;
+    EXECUTE format('SELECT %s(%s%s)', fn,
+                   CASE WHEN argtype = 'timestamp'::regtype THEN '$1 AT TIME ZONE ''UTC'''
+                        WHEN argtype = 'timestamptz'::regtype THEN '$1' END,
+                   CASE WHEN seed IS NULL THEN '' ELSE ', $2' END)
+        INTO r USING v, seed;
+    RETURN r;
+END
+$$;
+-- the functions it finds: the timestamptz ones on 18 and later, the timestamp ones before
+SELECT proc1.amproc::text = CASE WHEN current_setting('server_version_num')::int >= 180000
+                                 THEN 'timestamptz_hash' ELSE 'timestamp_hash' END AS hash_function_as_expected,
+       proc2.amproc::text = CASE WHEN current_setting('server_version_num')::int >= 180000
+                                 THEN 'timestamptz_hash_extended' ELSE 'timestamp_hash_extended' END AS extended_function_as_expected
+FROM pg_opclass c
+     JOIN pg_am a ON a.oid = c.opcmethod
+     JOIN pg_amproc proc1 ON proc1.amprocfamily = c.opcfamily AND proc1.amprocnum = 1
+                         AND proc1.amproclefttype = c.opcintype AND proc1.amprocrighttype = c.opcintype
+     JOIN pg_amproc proc2 ON proc2.amprocfamily = c.opcfamily AND proc2.amprocnum = 2
+                         AND proc2.amproclefttype = c.opcintype AND proc2.amprocrighttype = c.opcintype
+WHERE a.amname = 'hash' AND c.opcintype = 'timestamptz'::regtype AND c.opcdefault;
+ hash_function_as_expected | extended_function_as_expected 
+---------------------------+-------------------------------
+ t                         | t
+(1 row)
+
+-- IS DISTINCT FROM: a NULL from the lookup counts as a mismatch instead of passing
 SELECT count(*) AS values,
-       count(*) FILTER (WHERE jtimestamptz_hash(v) <> timestamptz_hash(v::timestamptz)) AS hash_mismatches,
-       count(*) FILTER (WHERE jtimestamptz_hash_extended(v, 7) <> timestamptz_hash_extended(v::timestamptz, 7)) AS ext_hash_mismatches,
+       count(*) FILTER (WHERE jtimestamptz_hash(v)::bigint IS DISTINCT FROM pg_temp.core_tz_hash(v::timestamptz)) AS hash_mismatches,
+       count(*) FILTER (WHERE jtimestamptz_hash_extended(v, 7) IS DISTINCT FROM pg_temp.core_tz_hash(v::timestamptz, 7)) AS ext_hash_mismatches,
        count(*) FILTER (WHERE (jtimestamptz_hash_extended(v, 0) & 4294967295) <> (jtimestamptz_hash(v)::bigint & 4294967295)) AS seed0_mismatches,
        count(*) FILTER (WHERE jtimestamptz_hash_extended(v, 1) <> jtimestamptz_hash_extended(v, 0)) > 0 AS seed_changes_hash
 FROM jt_ops_tz;

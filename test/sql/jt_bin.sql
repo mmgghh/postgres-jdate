@@ -98,13 +98,17 @@ FROM (VALUES
     ('month and day stride',  '1 month 1 day',    '1403-05-15 12:00:00', '1403-01-01 00:00:00'),
     ('zero stride',           '0 days',           '1403-05-15 12:00:00', '1403-01-01 00:00:00'),
     ('negative stride',       '-1 day',           '1403-05-15 12:00:00', '1403-01-01 00:00:00'),
-    ('infinite stride',       'infinity',         '1403-05-15 12:00:00', '1403-01-01 00:00:00'),
     ('infinite source',       '1 day',            'infinity',            '1403-01-01 00:00:00'),
     ('negative infinite source', '1 day',         '-infinity',           '1403-01-01 00:00:00'),
     ('infinite origin',       '1 day',            '1403-05-15 12:00:00', 'infinity'),
     ('negative infinite origin', '1 day',         '1403-05-15 12:00:00', '-infinity'),
     ('both infinite',         '1 day',            'infinity',            'infinity')
 ) v(label, stride, src, origin)) x;
+-- an infinite stride exists from PostgreSQL 17 on: core refuses it (22008) and so do we;
+-- before 17 the interval literal itself is refused (22007) on both sides. Same error either way.
+SELECT ours = core AS same, ours IN ('ERR 22008', 'ERR 22007') AS is_the_error
+FROM (SELECT pg_temp.zval('UTC', $$SELECT jdate_bin('infinity'::interval, '1403-05-15 12:00:00'::jtimestamp, '1403-01-01 00:00:00'::jtimestamp)::timestamp$$) AS ours,
+             pg_temp.zval('UTC', $$SELECT date_bin('infinity'::interval, '1403-05-15 12:00:00'::timestamp, '1403-01-01 00:00:00'::timestamp)$$) AS core) x;
 
 -- ---------------------------------------------------------------------
 -- jtimestamp, the lower edge. -0061-01-01 is Gregorian 0560-03-20 and 3000-01-01
@@ -260,12 +264,15 @@ FROM (VALUES
     ('year stride',           '1 year',        '1403-05-15 12:00:00+00', '1403-01-01 00:00:00+00'),
     ('zero stride',           '0 days',        '1403-05-15 12:00:00+00', '1403-01-01 00:00:00+00'),
     ('negative stride',       '-1 day',        '1403-05-15 12:00:00+00', '1403-01-01 00:00:00+00'),
-    ('infinite stride',       'infinity',      '1403-05-15 12:00:00+00', '1403-01-01 00:00:00+00'),
     ('infinite source',       '1 day',         'infinity',               '1403-01-01 00:00:00+00'),
     ('negative infinite source', '1 day',      '-infinity',              '1403-01-01 00:00:00+00'),
     ('infinite origin',       '1 day',         '1403-05-15 12:00:00+00', 'infinity'),
     ('both infinite',         '1 day',         'infinity',               'infinity')
 ) v(label, stride, src, origin)) x;
+-- the infinite stride, as above (22008 on 17 and later, 22007 before)
+SELECT ours = core AS same, ours IN ('ERR 22008', 'ERR 22007') AS is_the_error
+FROM (SELECT pg_temp.zval('UTC', $$SELECT jdate_bin('infinity'::interval, '1403-05-15 12:00:00+00'::jtimestamptz, '1403-01-01 00:00:00+00'::jtimestamptz)::timestamptz$$) AS ours,
+             pg_temp.zval('UTC', $$SELECT date_bin('infinity'::interval, '1403-05-15 12:00:00+00'::timestamptz, '1403-01-01 00:00:00+00'::timestamptz)$$) AS core) x;
 
 -- ---------------------------------------------------------------------
 -- jtimestamptz against core's date_bin: the same sweep over instants, repeated in
