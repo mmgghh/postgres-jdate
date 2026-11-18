@@ -1,0 +1,555 @@
+-- jgenerate_series: series of jtimestamp, jtimestamptz and jdate. As core's
+-- generate_series, element n + 1 is element n plus the step (so the clamp of a
+-- month step to the last day of a shorter month sticks) and the series stops at the
+-- first element past the finish; a step with a month part counts Jalali months;
+-- jtimestamptz steps on the wall clock of the session zone (or of the zone named by
+-- the fourth argument): months and days on the local clock, the time part as
+-- elapsed time. The function has its own name because a bare literal given to
+-- core's generate_series would pick the Gregorian calendar.
+--
+-- Checked three ways: hand-computed rows (each Jalali date below was converted by
+-- hand; the Gregorian date is in a comment where it matters), core's own
+-- generate_series wherever the step has no month part (casts between jtimestamp
+-- and timestamp are binary, so the values are the same numbers), and a model written
+-- with the + operator of the type, one element at a time, for every step. The model
+-- is an independent implementation (src/jtimestamp_arith.c, tested by jt_arith and
+-- jt_dst), so a disagreement shows in either. Errors are shown as SQLSTATE only.
+SET DateStyle = 'ISO, YMD';
+SET IntervalStyle = 'postgres';
+SET timezone = 'UTC';
+
+-- "ERR <sqlstate>" or the text of the single value of a query, under a zone
+-- (restored afterwards)
+CREATE FUNCTION pg_temp.zval(zone text, q text) RETURNS text
+LANGUAGE plpgsql AS $f$
+DECLARE
+    r text;
+BEGIN
+    PERFORM set_config('TimeZone', zone, false);
+    BEGIN
+        EXECUTE q INTO r;
+        r := coalesce(r, 'NULL');
+    EXCEPTION WHEN OTHERS THEN
+        r := 'ERR ' || SQLSTATE;
+    END;
+    PERFORM set_config('TimeZone', 'UTC', false);
+    RETURN r;
+END
+$f$;
+
+-- the model: element n + 1 = element n + step, with the + operator of the type
+CREATE FUNCTION pg_temp.model_ts(a jtimestamp, b jtimestamp, step interval)
+RETURNS jtimestamp[] LANGUAGE plpgsql AS $f$
+DECLARE
+    r jtimestamp[] := '{}';
+    cur jtimestamp := a;
+    sgn int := CASE WHEN step > interval '0' THEN 1 ELSE -1 END;
+BEGIN
+    WHILE (sgn > 0 AND cur <= b) OR (sgn < 0 AND cur >= b) LOOP
+        r := r || cur;
+        cur := cur + step;
+        IF cardinality(r) > 2000 THEN RAISE EXCEPTION 'runaway model'; END IF;
+    END LOOP;
+    RETURN r;
+END
+$f$;
+
+CREATE FUNCTION pg_temp.model_tstz(a jtimestamptz, b jtimestamptz, step interval)
+RETURNS jtimestamptz[] LANGUAGE plpgsql AS $f$
+DECLARE
+    r jtimestamptz[] := '{}';
+    cur jtimestamptz := a;
+    sgn int := CASE WHEN step > interval '0' THEN 1 ELSE -1 END;
+BEGIN
+    WHILE (sgn > 0 AND cur <= b) OR (sgn < 0 AND cur >= b) LOOP
+        r := r || cur;
+        cur := cur + step;
+        IF cardinality(r) > 2000 THEN RAISE EXCEPTION 'runaway model'; END IF;
+    END LOOP;
+    RETURN r;
+END
+$f$;
+
+-- ---------------------------------------------------------------------
+-- the functions in the catalog: set-returning, STRICT, PARALLEL SAFE; the
+-- jtimestamptz form that reads the session zone is STABLE, the others IMMUTABLE
+-- (the form with a zone argument is IMMUTABLE as core's); the jdate form with an
+-- integer step has a default step
+-- ---------------------------------------------------------------------
+SELECT p.oid::regprocedure AS function, p.prorettype::regtype AS returns,
+       p.proretset AS setof, p.provolatile AS volatility, p.proisstrict AS strict,
+       p.proparallel AS parallel, p.pronargdefaults AS defaults
+FROM pg_proc p
+JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+                AND d.deptype = 'e' AND d.refclassid = 'pg_extension'::regclass
+WHERE p.proname = 'jgenerate_series'
+ORDER BY p.oid::regprocedure::text;
+
+-- ---------------------------------------------------------------------
+-- month steps from 1403-01-31: the clamp sticks. Farvardin to Shahrivar have 31
+-- days, Mehr to Bahman 30, Esfand 29 (30 in a leap year such as 1403): 1403-06-31
+-- plus a month is 1403-07-30, and from then on the day stays 30, also in the
+-- months that have 31 days
+-- ---------------------------------------------------------------------
+SELECT g FROM jgenerate_series(jtimestamp '1403-01-31 00:00', jtimestamp '1404-03-01', interval '1 month') g;
+
+-- the same with a time of day, and from the jdate (a series of jtimestamp)
+SELECT g FROM jgenerate_series(jtimestamp '1403-01-31 13:45:10.5', jtimestamp '1403-09-01', interval '1 month') g;
+SELECT g, pg_typeof(g) AS type FROM jgenerate_series(jdate '1403-01-31', jdate '1403-05-01', interval '1 month') g;
+
+-- ... and downwards: 1403-06-31 minus months lands on 31-day months, then 1402-12-29
+SELECT g FROM jgenerate_series(jtimestamp '1403-06-31', jtimestamp '1402-12-01', interval '-1 month') g;
+
+-- the clamp sticks even when the month would allow the day again (element n + 1
+-- is element n plus the step, not the start plus n steps): 1403-07-30 stays on 30
+-- through 1404-02-30 although Ordibehesht has 31 days
+SELECT g FROM jgenerate_series(jtimestamp '1403-06-31', jtimestamp '1404-03-01', interval '1 month') g
+WHERE g >= jtimestamp '1403-12-01';
+-- the negative control for the model "start plus n steps": it gives 1404-02-31 for
+-- the same row where the series gives 1404-02-30
+SELECT (SELECT g FROM jgenerate_series(jtimestamp '1403-06-31', jtimestamp '1404-03-01', interval '1 month') g
+        OFFSET 8 LIMIT 1) AS series_9th,
+       jtimestamp '1403-06-31' + 8 * interval '1 month' AS start_plus_n_steps,
+       (SELECT g FROM jgenerate_series(jtimestamp '1403-06-31', jtimestamp '1404-03-01', interval '1 month') g
+        OFFSET 8 LIMIT 1) = jtimestamp '1403-06-31' + 8 * interval '1 month' AS same;
+
+-- ---------------------------------------------------------------------
+-- year steps from a leap Esfand 30 (1399 and 1403 are leap years): a year is 12
+-- months, the clamp to 29 sticks, so a later leap year (1408) does not bring the
+-- 30 back
+-- ---------------------------------------------------------------------
+SELECT g FROM jgenerate_series(jtimestamp '1403-12-30', jtimestamp '1408-12-30', interval '1 year') g;
+SELECT g FROM jgenerate_series(jtimestamp '1399-12-30 06:00', jtimestamp '1403-12-30 06:00', interval '12 months') g;
+SELECT g FROM jgenerate_series(jtimestamp '1399-12-30', jtimestamp '1410-01-01', interval '2 years') g;
+-- backwards from the next leap year to the previous one: 29 first, never 30
+SELECT g FROM jgenerate_series(jtimestamp '1408-12-30', jtimestamp '1403-12-30', interval '-1 year') g;
+-- a quarter step and a month and day step (months, then days: 1403-01-31 + 1
+-- month is 1403-02-31, plus 1 day is 1403-03-01; and so on)
+SELECT g FROM jgenerate_series(jtimestamp '1403-11-30', jtimestamp '1404-12-29', interval '3 months') g;
+SELECT g FROM jgenerate_series(jtimestamp '1403-01-31', jtimestamp '1403-07-01', interval '1 month 1 day') g;
+SELECT g FROM jgenerate_series(jtimestamp '1403-01-31', jtimestamp '1403-04-01', interval '1 month 12 hours') g;
+
+-- ---------------------------------------------------------------------
+-- negative steps: days, hours and an integer step on jdate; the series is
+-- empty when the finish is on the wrong side of the start
+-- ---------------------------------------------------------------------
+SELECT g FROM jgenerate_series(jtimestamp '1403-01-02 06:00', jtimestamp '1402-12-29 06:00', interval '-1 day') g;
+SELECT g FROM jgenerate_series(jtimestamp '1403-01-01 00:00', jtimestamp '1402-12-29 00:00', interval '-1 day 1 hour') g;
+SELECT g FROM jgenerate_series(jdate '1403-01-03', jdate '1402-12-29', -2) g;
+SELECT count(*) AS positive_step_finish_before_start
+FROM jgenerate_series(jtimestamp '1403-01-02', jtimestamp '1403-01-01', interval '1 day');
+SELECT count(*) AS negative_step_finish_after_start
+FROM jgenerate_series(jtimestamp '1403-01-01', jtimestamp '1403-01-02', interval '-1 day');
+SELECT count(*) AS int_positive_step_finish_before_start FROM jgenerate_series(jdate '1403-01-02', jdate '1403-01-01', 1);
+SELECT count(*) AS int_negative_step_finish_after_start FROM jgenerate_series(jdate '1403-01-01', jdate '1403-01-02', -1);
+-- start = finish is one row, for any step
+SELECT g FROM jgenerate_series(jtimestamp '1403-05-05 05:05', jtimestamp '1403-05-05 05:05', interval '1 month') g;
+SELECT g FROM jgenerate_series(jtimestamp '1403-05-05 05:05', jtimestamp '1403-05-05 05:05', interval '-1 year') g;
+SELECT g FROM jgenerate_series(jdate '1403-05-05', jdate '1403-05-05', 7) g;
+
+-- ---------------------------------------------------------------------
+-- jdate with an integer step: a series of jdate, the default step is 1
+-- ---------------------------------------------------------------------
+SELECT g, pg_typeof(g) AS type FROM jgenerate_series(jdate '1403-12-28', jdate '1404-01-02') g;
+SELECT g FROM jgenerate_series(jdate '1403-01-01', jdate '1403-02-03', 7) g;
+-- Esfand 1403 has 30 days (a leap year), Esfand 1404 has 29
+SELECT g FROM jgenerate_series(jdate '1403-12-29', jdate '1404-01-01', 1) g;
+SELECT g FROM jgenerate_series(jdate '1404-12-28', jdate '1405-01-01', 1) g;
+-- the extreme steps are exact (the arithmetic is wider than int)
+SELECT g FROM jgenerate_series(jdate '1403-01-01', jdate '3177-12-29', 2147483647) g;
+SELECT g FROM jgenerate_series(jdate '1403-01-01', jdate '-0061-01-01', -2147483647 - 1) g;
+-- the full range: one row per day, as many as the difference says
+SELECT count(*) = jdate '3177-12-29' - jdate '-0061-01-01' + 1 AS days_of_the_full_range,
+       min(g) AS first, max(g) AS last
+FROM jgenerate_series(jdate '-0061-01-01', jdate '3177-12-29') g;
+SELECT count(*) = jdate '3177-12-29' - jdate '-0061-01-01' + 1 AS days_of_the_full_range_downwards,
+       min(g) AS first, max(g) AS last
+FROM jgenerate_series(jdate '3177-12-29', jdate '-0061-01-01', -1) g;
+-- the same as the jtimestamp series of whole days
+SELECT count(*) = jdate '3177-12-29' - jdate '-0061-01-01' + 1 AS jtimestamp_days_of_the_full_range
+FROM jgenerate_series(jtimestamp '-0061-01-01', jtimestamp '3177-12-29 23:59:59.999999', interval '1 day');
+-- every month of the full range: 3238 years, 12 months each
+SELECT count(*) = (3177 - (-61) + 1) * 12 AS months_of_the_full_range, min(g) AS first, max(g) AS last
+FROM jgenerate_series(jtimestamp '-0061-01-01', jtimestamp '3177-12-29 23:59:59.999999', interval '1 month') g;
+
+-- ---------------------------------------------------------------------
+-- DST day steps in Paris keep the wall time: 1403-01-12 is 2024-03-31 (the clock
+-- goes from 02:00 to 03:00) and 1403-08-06 is 2024-10-27 (03:00 back to 02:00)
+-- ---------------------------------------------------------------------
+SET timezone = 'Europe/Paris';
+SELECT g, g::timestamptz AS gregorian
+FROM jgenerate_series(jtimestamptz '1403-01-11 12:00+01', jtimestamptz '1403-01-14 12:00+02', interval '1 day') g;
+-- 24 hours is not a day: the wall time moves by an hour
+SELECT g FROM jgenerate_series(jtimestamptz '1403-01-11 12:00+01', jtimestamptz '1403-01-14 12:00+02', interval '24 hours') g;
+SELECT g, g::timestamptz AS gregorian
+FROM jgenerate_series(jtimestamptz '1403-08-05 12:00+02', jtimestamptz '1403-08-08 12:00+01', interval '1 day') g;
+SELECT g FROM jgenerate_series(jtimestamptz '1403-08-05 12:00+02', jtimestamptz '1403-08-08 12:00+01', interval '24 hours') g;
+-- a wall time that does not exist (02:30 on 03-31) moves forward and then the
+-- series stays on the new wall time (03:30)
+SELECT g, g::timestamptz AS gregorian
+FROM jgenerate_series(jtimestamptz '1403-01-11 02:30+01', jtimestamptz '1403-01-14 12:00+02', interval '1 day') g;
+-- a wall time that occurs twice (02:30 on 10-27) takes its second occurrence (+01)
+SELECT g, g::timestamptz AS gregorian
+FROM jgenerate_series(jtimestamptz '1403-08-05 02:30+02', jtimestamptz '1403-08-08 12:00+01', interval '1 day') g;
+-- a month step across the change: 1402-12-12 is 2024-03-02
+SELECT g, g::timestamptz AS gregorian
+FROM jgenerate_series(jtimestamptz '1402-12-12 12:00+01', jtimestamptz '1403-03-01 00:00+02', interval '1 month') g;
+-- a time step is elapsed time: hourly across the gap there is no 02:xx
+SELECT g FROM jgenerate_series(jtimestamptz '1403-01-12 00:30+01', jtimestamptz '1403-01-12 04:30+02', interval '1 hour') g;
+SET timezone = 'UTC';
+
+-- the same instants under the zone argument, whatever the session zone is
+SELECT g FROM jgenerate_series(jtimestamptz '1403-01-11 12:00+01', jtimestamptz '1403-01-14 12:00+02', interval '1 day', 'Europe/Paris') g;
+SET timezone = 'Asia/Tehran';
+SELECT g FROM jgenerate_series(jtimestamptz '1403-01-11 12:00+01', jtimestamptz '1403-01-14 12:00+02', interval '1 day', 'Europe/Paris') g;
+SELECT g FROM jgenerate_series(jtimestamptz '1403-01-11 12:00+01', jtimestamptz '1403-01-14 12:00+02', interval '1 day') g;
+SET timezone = 'UTC';
+
+-- ---------------------------------------------------------------------
+-- series that end exactly at a range edge, and do not fail on the element after it
+-- ---------------------------------------------------------------------
+-- jtimestamp, days, hours and months up to the last representable value
+SELECT g FROM jgenerate_series(jtimestamp '3177-12-28 23:59:59.999999', jtimestamp '3177-12-29 23:59:59.999999', interval '1 day') g;
+SELECT g FROM jgenerate_series(jtimestamp '3177-12-29 22:00', jtimestamp '3177-12-29 23:59:59.999999', interval '1 hour') g;
+SELECT g FROM jgenerate_series(jtimestamp '3177-10-29', jtimestamp '3177-12-29 23:59:59.999999', interval '1 month') g;
+SELECT g FROM jgenerate_series(jtimestamp '3177-06-31', jtimestamp '3177-12-29 23:59:59.999999', interval '1 month') g;
+SELECT g FROM jgenerate_series(jtimestamp '3177-12-29 23:59:59.999999', jtimestamp '3177-12-29 23:59:59.999999', interval '1 month') g;
+SELECT g FROM jgenerate_series(jtimestamp '3177-12-29 23:59:59.999999', jtimestamp '3177-12-29 23:59:59.999999', interval '1 microsecond') g;
+-- ... and the first representable value, downwards
+SELECT g FROM jgenerate_series(jtimestamp '-0061-03-01', jtimestamp '-0061-01-01', interval '-1 month') g;
+SELECT g FROM jgenerate_series(jtimestamp '-0061-01-03 12:00', jtimestamp '-0061-01-01 00:00', interval '-1 day') g;
+SELECT g FROM jgenerate_series(jtimestamp '-0061-01-01', jtimestamp '-0061-01-01', interval '-1 microsecond') g;
+SELECT g FROM jgenerate_series(jtimestamp '-0061-01-01 00:00:00.000002', jtimestamp '-0061-01-01', interval '-1 microsecond') g;
+-- jdate: both ends
+SELECT g FROM jgenerate_series(jdate '3177-12-27', jdate '3177-12-29') g;
+SELECT g FROM jgenerate_series(jdate '-0061-01-03', jdate '-0061-01-01', -1) g;
+SELECT g FROM jgenerate_series(jdate '3177-12-29', jdate '3177-12-29', interval '1 month') g;
+SELECT g FROM jgenerate_series(jdate '3177-11-29', jdate '3177-12-29', interval '1 month') g;
+-- jtimestamptz: the safe range ends 16 hours inside the Jalali range (an instant
+-- must be displayable in every zone): the last valid instant is 3177-12-29
+-- 07:59:59.999999 UTC and the first is -0061-01-01 16:00 UTC
+SELECT g FROM jgenerate_series(jtimestamptz '3177-12-27 07:59:59.999999+00', jtimestamptz '3177-12-29 07:59:59.999999+00', interval '1 day') g;
+SELECT g FROM jgenerate_series(jtimestamptz '3177-10-29 07:59:59.999999+00', jtimestamptz '3177-12-29 07:59:59.999999+00', interval '1 month') g;
+SELECT g FROM jgenerate_series(jtimestamptz '3177-12-29 06:59:59.999999+00', jtimestamptz '3177-12-29 07:59:59.999999+00', interval '1 hour') g;
+SELECT g FROM jgenerate_series(jtimestamptz '3177-12-29 07:59:59.999999+00', jtimestamptz '3177-12-29 07:59:59.999999+00', interval '1 day') g;
+SELECT g FROM jgenerate_series(jtimestamptz '-0061-03-01 16:00+00', jtimestamptz '-0061-01-01 16:00+00', interval '-1 month') g;
+SELECT g FROM jgenerate_series(jtimestamptz '-0061-01-03 16:00+00', jtimestamptz '-0061-01-01 16:00+00', interval '-1 day') g;
+-- a month step that lands in the 16 hour margin is past the end of the range (the
+-- month step on 3177-11-29 08:00 gives 3177-12-29 08:00, one microsecond too late)
+SELECT g FROM jgenerate_series(jtimestamptz '3177-11-29 08:00+00', jtimestamptz '3177-12-29 07:59:59.999999+00', interval '1 month') g;
+SELECT g FROM jgenerate_series(jtimestamptz '3177-11-29 07:59:59.999999+00', jtimestamptz '3177-12-29 07:59:59.999999+00', interval '1 month') g;
+-- the zone argument at the end of the range (Paris is on +01 in December: the
+-- instants are the ones of the UTC series, whose wall times are an hour later)
+SELECT g FROM jgenerate_series(jtimestamptz '3177-12-28 07:59:59.999999+00', jtimestamptz '3177-12-29 07:59:59.999999+00', interval '1 day', 'Europe/Paris') g;
+-- the same at the two zones with the largest offsets, as the session zone (POSIX
+-- names: the sign is inverted, UTC-15:59 is 15:59 east of Greenwich)
+SET timezone = 'UTC-15:59';
+SELECT g FROM jgenerate_series(jtimestamptz '3177-12-27 23:58:59.999999+15:59', jtimestamptz '3177-12-29 23:58:59.999999+15:59', interval '1 day') g;
+SELECT g FROM jgenerate_series(jtimestamptz '3177-10-29 23:58:59.999999+15:59', jtimestamptz '3177-12-29 23:58:59.999999+15:59', interval '1 month') g;
+SELECT g FROM jgenerate_series(jtimestamptz '-0061-01-03 07:59:00+15:59', jtimestamptz '-0061-01-02 07:59:00+15:59', interval '-1 day') g;
+SET timezone = 'UTC+15:59';
+SELECT g FROM jgenerate_series(jtimestamptz '3177-12-27 16:00:59.999999-15:59', jtimestamptz '3177-12-28 16:00:59.999999-15:59', interval '1 day') g;
+SELECT g FROM jgenerate_series(jtimestamptz '-0061-01-03 00:01:00-15:59', jtimestamptz '-0061-01-01 00:01:00-15:59', interval '-1 day') g;
+SELECT g FROM jgenerate_series(jtimestamptz '-0061-03-01 00:01:00-15:59', jtimestamptz '-0061-01-01 00:01:00-15:59', interval '-1 month') g;
+SET timezone = 'UTC';
+
+-- a step whose month part and day part point in different directions can leave the
+-- range on the side where the series does not end: the next element cannot be
+-- returned, 22008 (the sign of a step is core's, months counting as 30 days: -1
+-- month and 40 days is positive, 1 month and -40 days negative)
+SELECT pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamp '-0061-01-05', jtimestamp '-0061-02-01', interval '-1 month 40 days')$q$) AS below_the_start;
+SELECT pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamp '3177-12-20', jtimestamp '3177-12-01', interval '1 month -40 days')$q$) AS above_the_end;
+SELECT pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamptz '-0061-01-05 16:00+00', jtimestamptz '-0061-02-01 16:00+00', interval '-1 month 40 days')$q$) AS tz_below_the_start;
+SELECT pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jdate '-0061-01-05', jdate '-0061-02-01', interval '-1 month 40 days')$q$) AS jdate_below_the_start;
+-- ... while the same step inside the range is fine: 1403-01-31 plus a month is
+-- 1403-02-31, minus 40 days is 1403-01-22, and so on
+SELECT g FROM jgenerate_series(jtimestamp '1403-01-31', jtimestamp '1402-12-01', interval '1 month -40 days') g;
+-- core's own overflow for a step that cannot be added (the same SQLSTATE as for a
+-- core timestamp)
+SELECT pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamp '1403-01-01', jtimestamp '1403-01-02', interval '2147483647 days')$q$) AS jtimestamp_day_overflow,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM generate_series(timestamp '2024-03-20', timestamp '2024-03-21', interval '2147483647 days')$q$) AS core_day_overflow;
+-- a month step that is beyond the range in the direction of the series just ends
+-- it (the + operator on the same row is 22008)
+SELECT g FROM jgenerate_series(jtimestamp '1403-01-01', jtimestamp '1404-01-01', interval '2147483647 months') g;
+SELECT g FROM jgenerate_series(jtimestamp '1403-01-01', jtimestamp '1300-01-01', interval '-2147483648 months') g;
+SELECT pg_temp.zval('UTC', $q$SELECT jtimestamp '1403-01-01' + interval '2147483647 months'$q$) AS plus_operator;
+
+-- ---------------------------------------------------------------------
+-- errors: a zero step is 22023, also when it is zero by core's comparison (a
+-- month counts as 30 days there); an infinite endpoint is 22023 (core 18 loops
+-- on it); NULL arguments give no rows; an unknown zone is 22023 whatever the
+-- step is, also for an empty series
+-- ---------------------------------------------------------------------
+SELECT pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamp '1403-01-01', jtimestamp '1403-01-05', interval '0')$q$) AS jtimestamp_zero,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamp '1403-01-01', jtimestamp '1403-01-05', interval '1 month -30 days')$q$) AS jtimestamp_zero_by_comparison,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamptz '1403-01-01', jtimestamptz '1403-01-05', interval '0')$q$) AS jtimestamptz_zero,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamptz '1403-01-01', jtimestamptz '1403-01-05', interval '0', 'UTC')$q$) AS jtimestamptz_zone_zero,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jdate '1403-01-01', jdate '1403-01-05', interval '0')$q$) AS jdate_interval_zero,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jdate '1403-01-01', jdate '1403-01-05', 0)$q$) AS jdate_int_zero,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM generate_series(timestamp '2024-03-20', timestamp '2024-03-25', interval '0')$q$) AS core_zero;
+SELECT pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamp 'infinity', jtimestamp '1403-01-05', interval '1 day')$q$) AS jtimestamp_start_inf,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamp '-infinity', jtimestamp '1403-01-05', interval '1 day')$q$) AS jtimestamp_start_minus_inf,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamp '1403-01-05', jtimestamp 'infinity', interval '1 day')$q$) AS jtimestamp_stop_inf,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamp '1403-01-05', jtimestamp '-infinity', interval '-1 day')$q$) AS jtimestamp_stop_minus_inf,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamptz 'infinity', jtimestamptz '1403-01-05', interval '1 day')$q$) AS jtimestamptz_start_inf,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamptz '1403-01-05', jtimestamptz 'infinity', interval '1 day')$q$) AS jtimestamptz_stop_inf,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamptz '-infinity', jtimestamptz '1403-01-05', interval '1 day', 'UTC')$q$) AS jtimestamptz_zone_start_inf,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamptz '1403-01-05', jtimestamptz 'infinity', interval '1 day', 'UTC')$q$) AS jtimestamptz_zone_stop_inf,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jdate 'infinity', jdate '1403-01-05', interval '1 day')$q$) AS jdate_interval_start_inf,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jdate '1403-01-05', jdate '-infinity', interval '-1 day')$q$) AS jdate_interval_stop_inf,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jdate '-infinity', jdate '1403-01-05', 1)$q$) AS jdate_int_start_inf,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jdate '1403-01-05', jdate 'infinity', 1)$q$) AS jdate_int_stop_inf;
+-- an infinite step exists from PostgreSQL 17 on (22023, as core); before it the
+-- interval literal is not valid (22007)
+SELECT pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamp '1403-01-01', jtimestamp '1403-01-05', interval 'infinity')$q$)
+           IN ('ERR 22023', 'ERR 22007') AS jtimestamp_inf_step,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamptz '1403-01-01', jtimestamptz '1403-01-05', interval '-infinity')$q$)
+           IN ('ERR 22023', 'ERR 22007') AS jtimestamptz_inf_step,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamptz '1403-01-01', jtimestamptz '1403-01-05', interval 'infinity', 'UTC')$q$)
+           IN ('ERR 22023', 'ERR 22007') AS jtimestamptz_zone_inf_step,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jdate '1403-01-01', jdate '1403-01-05', interval 'infinity')$q$)
+           IN ('ERR 22023', 'ERR 22007') AS jdate_inf_step;
+-- NULL arguments: no rows, as for any strict set-returning function
+SELECT count(*) AS null_start FROM jgenerate_series(NULL::jtimestamp, jtimestamp '1403-01-05', interval '1 day');
+SELECT count(*) AS null_step FROM jgenerate_series(jtimestamp '1403-01-01', jtimestamp '1403-01-05', NULL::interval);
+SELECT count(*) AS null_zone FROM jgenerate_series(jtimestamptz '1403-01-01', jtimestamptz '1403-01-05', interval '1 day', NULL);
+SELECT count(*) AS null_int_step FROM jgenerate_series(jdate '1403-01-01', jdate '1403-01-05', NULL::int);
+-- zones
+SELECT pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamptz '1403-01-01', jtimestamptz '1403-01-05', interval '1 hour', 'Foo/Bar')$q$) AS unknown_zone_hour_step,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamptz '1403-01-05', jtimestamptz '1403-01-01', interval '1 day', 'Foo/Bar')$q$) AS unknown_zone_empty_series,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM generate_series(timestamptz '2024-03-20', timestamptz '2024-03-25', interval '1 hour', 'Foo/Bar')$q$)
+           IN ('ERR 22023', 'ERR 42883') AS core_unknown_zone,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamptz '1403-01-01', jtimestamptz '1403-01-05', interval '1 day', '')$q$) AS empty_zone;
+-- the zone is core's: a POSIX specification with its own daylight saving rule
+-- steps like the zone it describes, a fixed offset (a POSIX name, the sign
+-- inverted, or an abbreviation) like the zone or the offset it stands for; the
+-- last column is the control, a fixed offset is not Paris across the change
+CREATE FUNCTION pg_temp.zone_series(zone text) RETURNS jtimestamptz[]
+LANGUAGE sql AS $f$
+    SELECT array(SELECT g FROM jgenerate_series(jtimestamptz '1403-01-10 12:00+00', jtimestamptz '1403-01-14 12:00+00', interval '1 day', zone) g)
+$f$;
+SELECT pg_temp.zone_series('Europe/Paris') = pg_temp.zone_series('CET-1CEST,M3.5.0,M10.5.0/3') AS posix_rule_is_paris,
+       pg_temp.zone_series('UTC-1') = pg_temp.zone_series('Etc/GMT-1') AS posix_offset_is_the_named_zone,
+       pg_temp.zone_series('EST') = pg_temp.zone_series('UTC+5') AS abbreviation_is_its_offset,
+       pg_temp.zone_series('Europe/Paris') = pg_temp.zone_series('UTC-1') AS control_paris_is_a_fixed_offset;
+
+-- ---------------------------------------------------------------------
+-- bare literals: all of them unknown is ambiguous (42725), recorded as the
+-- intended safety property: the series functions of three types share the
+-- name, none of them is preferred, and no literal can pick the Gregorian
+-- calendar (there is no generate_series on these types to take it). One typed
+-- argument decides the others. The forms with an unambiguous shape resolve: only
+-- the jdate form takes an int step or a default one, only the jtimestamptz form
+-- has four arguments
+-- ---------------------------------------------------------------------
+SELECT pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series('1403-01-01', '1403-03-01', interval '1 month')$q$) AS bare_with_interval,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series('1403-01-01', '1403-03-01', '1 month')$q$) AS bare_all_unknown,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series('1403-01-01', '1403-01-05', 1)$q$) AS bare_with_int_step,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series('1403-01-01', '1403-01-05')$q$) AS bare_default_step,
+       pg_temp.zval('UTC', $q$SELECT string_agg(g::text, ' ') FROM jgenerate_series('1403-01-01 12:00', '1403-01-03', interval '1 day', 'UTC') g$q$) AS bare_with_zone,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jdate '1403-01-01', '1403-03-01', interval '1 month')$q$) AS one_typed_jdate,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series(jtimestamp '1403-01-01', '1403-03-01', interval '1 month')$q$) AS one_typed_jtimestamp,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM jgenerate_series('1403-01-01', jtimestamptz '1403-03-01', interval '1 month')$q$) AS one_typed_jtimestamptz;
+
+-- ---------------------------------------------------------------------
+-- core's generate_series is unchanged: it is not part of the extension, it still
+-- steps in the Gregorian calendar on core types, and it does not accept the new
+-- types (no implicit casts), so the Gregorian calendar cannot be reached by
+-- accident
+-- ---------------------------------------------------------------------
+SELECT count(*) AS generate_series_in_extension
+FROM pg_proc p
+JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+                AND d.deptype = 'e' AND d.refclassid = 'pg_extension'::regclass
+WHERE p.proname = 'generate_series';
+SELECT g FROM generate_series(timestamp '2024-01-31', timestamp '2024-05-01', interval '1 month') g;
+SELECT g FROM generate_series(date '2024-03-30', date '2024-04-01', interval '1 day') g;
+SELECT g FROM generate_series(1, 3) g;
+SELECT pg_temp.zval('UTC', $q$SELECT count(*) FROM generate_series(jtimestamp '1403-01-01', jtimestamp '1403-01-05', interval '1 day')$q$) AS core_with_jtimestamp,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM generate_series(jtimestamptz '1403-01-01', jtimestamptz '1403-01-05', interval '1 day')$q$) AS core_with_jtimestamptz,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM generate_series(jdate '1403-01-01', jdate '1403-01-05', interval '1 day')$q$) AS core_with_jdate,
+       pg_temp.zval('UTC', $q$SELECT count(*) FROM generate_series(jdate '1403-01-01', jdate '1403-01-05', 1)$q$) AS core_with_jdate_int;
+-- the Jalali series is not the Gregorian one: 1403-01-31 plus a month in core's
+-- calendar is a different day (the negative control for every comparison below)
+SELECT array(SELECT g::timestamp FROM jgenerate_series(jtimestamp '1403-01-31', jtimestamp '1403-06-01', interval '1 month') g)
+       = array(SELECT g FROM generate_series(timestamp '2024-04-19', timestamp '2024-08-22', interval '1 month') g) AS same_as_gregorian_months;
+
+-- ---------------------------------------------------------------------
+-- as FROM items, in lateral joins and with LIMIT: the state is per call, the
+-- series restarts for every row, an early stop frees nothing it should not
+-- ---------------------------------------------------------------------
+SELECT s.name, count(g) AS n, min(g) AS first, max(g) AS last
+FROM (VALUES ('days', interval '1 day'), ('weeks', interval '7 days'), ('months', interval '1 month'),
+             ('years', interval '1 year')) s(name, step)
+CROSS JOIN LATERAL jgenerate_series(jtimestamp '1403-01-31', jtimestamp '1406-01-01', s.step) g
+GROUP BY s.name ORDER BY min(s.step);
+SELECT g, n FROM jgenerate_series(jtimestamp '1403-01-01', jtimestamp '1403-12-29', interval '1 month') WITH ORDINALITY AS t(g, n) WHERE n IN (1, 7, 12);
+SELECT jgenerate_series(jdate '1403-01-01', jdate '3177-12-29') AS lim LIMIT 3;
+SELECT jgenerate_series(jtimestamp '1403-01-01', jtimestamp '3177-12-29', interval '1 month') AS lim LIMIT 2;
+SELECT (SELECT max(g) FROM jgenerate_series(d, d + 3) g) AS last_of_four
+FROM (VALUES (jdate '1403-12-28'), (jdate '1404-12-28')) v(d);
+
+-- ---------------------------------------------------------------------
+-- core's generate_series on the equivalent core values, for steps without a month:
+-- jtimestamp (the cast is binary, the values are the same numbers) and jtimestamptz
+-- in the session zone, over start instants every 90 minutes around the clock
+-- changes of Paris, Tehran and Sao Paulo and in Kolkata, which has none
+-- ---------------------------------------------------------------------
+CREATE TEMP TABLE zones (zone text, from_ts timestamptz, to_ts timestamptz);
+INSERT INTO zones VALUES
+ ('Europe/Paris',        '2024-03-30 00:00+00', '2024-04-01 12:00+00'),
+ ('Europe/Paris',        '2024-10-26 00:00+00', '2024-10-28 12:00+00'),
+ ('Asia/Tehran',         '2020-03-20 00:00+00', '2020-03-22 12:00+00'),
+ ('Asia/Tehran',         '2020-09-20 00:00+00', '2020-09-22 12:00+00'),
+ ('America/Sao_Paulo',   '2018-11-03 00:00+00', '2018-11-05 12:00+00'),
+ ('America/Sao_Paulo',   '2019-02-16 00:00+00', '2019-02-18 12:00+00'),
+ ('Asia/Kolkata',        '2024-03-30 00:00+00', '2024-04-01 12:00+00'),
+ ('UTC',                 '2024-03-30 00:00+00', '2024-03-31 12:00+00');
+CREATE TEMP TABLE day_steps (step interval);
+INSERT INTO day_steps VALUES ('1 day'), ('7 days'), ('1 hour'), ('25 hours'), ('30 minutes'),
+ ('1 day 1 hour'), ('-1 day'), ('-36 hours'), ('-1 day -1 hour'), ('2 days -30 minutes'), ('1 microsecond');
+CREATE TEMP TABLE month_steps (step interval);
+INSERT INTO month_steps VALUES ('1 month'), ('-1 month'), ('1 month 1 day'), ('-1 month -1 day'),
+ ('1 year'), ('-1 year'), ('3 months 12 hours'), ('1 month -1 day'), ('2 months 25 hours'),
+ ('-2 months 1 day 1 hour');
+CREATE TEMP TABLE cases AS
+SELECT z.zone, s AS start_at, st.step, s + st.step * 5 AS finish_at
+FROM zones z
+CROSS JOIN LATERAL generate_series(z.from_ts, z.to_ts, interval '90 minutes') s
+CROSS JOIN day_steps st
+WHERE st.step <> interval '1 microsecond';
+INSERT INTO cases
+SELECT z.zone, s, st.step, s + st.step * 5
+FROM zones z
+CROSS JOIN LATERAL generate_series(z.from_ts, z.to_ts, interval '6 hours') s
+CROSS JOIN day_steps st
+WHERE st.step = interval '1 microsecond' AND z.zone = 'UTC';
+-- the model comparison for one case: the series in the session zone against the
+-- operator model
+CREATE FUNCTION pg_temp.same_as_model_tz(zone text, a timestamptz, b timestamptz, step interval)
+RETURNS boolean LANGUAGE plpgsql AS $f$
+DECLARE
+    ours jtimestamptz[];
+    model jtimestamptz[];
+BEGIN
+    PERFORM set_config('TimeZone', zone, false);
+    ours := array(SELECT g FROM jgenerate_series(a::jtimestamptz, b::jtimestamptz, step) g);
+    model := pg_temp.model_tstz(a::jtimestamptz, b::jtimestamptz, step);
+    PERFORM set_config('TimeZone', 'UTC', false);
+    RETURN ours = model;
+END
+$f$;
+-- jtimestamptz in the session zone = core's timestamptz generate_series; the
+-- cast jtimestamptz -> timestamptz is binary
+CREATE FUNCTION pg_temp.same_as_core_tz(zone text, a timestamptz, b timestamptz, step interval)
+RETURNS boolean LANGUAGE plpgsql AS $f$
+DECLARE
+    ours timestamptz[];
+    core timestamptz[];
+BEGIN
+    PERFORM set_config('TimeZone', zone, false);
+    ours := array(SELECT g::timestamptz FROM jgenerate_series(a::jtimestamptz, b::jtimestamptz, step) g);
+    core := array(SELECT g FROM generate_series(a, b, step) g);
+    PERFORM set_config('TimeZone', 'UTC', false);
+    RETURN ours = core;
+END
+$f$;
+-- ... and the form with a zone argument gives the same as the session zone
+CREATE FUNCTION pg_temp.zone_arg_same_as_session(zone text, a timestamptz, b timestamptz, step interval)
+RETURNS boolean LANGUAGE plpgsql AS $f$
+DECLARE
+    session_zone timestamptz[];
+    zone_arg timestamptz[];
+BEGIN
+    PERFORM set_config('TimeZone', zone, false);
+    session_zone := array(SELECT g::timestamptz FROM jgenerate_series(a::jtimestamptz, b::jtimestamptz, step) g);
+    PERFORM set_config('TimeZone', 'UTC', false);
+    zone_arg := array(SELECT g::timestamptz FROM jgenerate_series(a::jtimestamptz, b::jtimestamptz, step, zone) g);
+    RETURN session_zone = zone_arg;
+END
+$f$;
+SELECT count(*) > 0 AS cases_exist,
+       count(*) FILTER (WHERE NOT pg_temp.same_as_core_tz(zone, start_at, finish_at, step)) AS differ_from_core,
+       count(*) FILTER (WHERE NOT pg_temp.zone_arg_same_as_session(zone, start_at, finish_at, step)) AS zone_arg_differs
+FROM cases;
+-- the negative control: months are not Gregorian, so core's series differs from
+-- ours for month steps (the comparison above could fail)
+CREATE TEMP TABLE month_cases AS
+SELECT z.zone, s AS start_at, st.step, (s::jtimestamptz + st.step * 5)::timestamptz AS finish_at
+FROM zones z
+CROSS JOIN LATERAL generate_series(z.from_ts, z.to_ts, interval '90 minutes') s
+CROSS JOIN month_steps st;
+SELECT count(*) > 0 AS month_cases_exist,
+       count(*) FILTER (WHERE NOT pg_temp.same_as_core_tz(zone, start_at, finish_at, step)) > 0 AS month_steps_differ_from_core
+FROM month_cases;
+
+-- month steps that land exactly on the clock changes: the starts are one step
+-- before the instants of the windows (by the Jalali month rules, on the clock of the
+-- zone), so that the series reaches the gap (02:30 does not exist in Paris on
+-- 1403-01-12) and the overlap, and the wall time moves forward or takes its second
+-- occurrence
+CREATE TEMP TABLE gap_cases AS
+SELECT z.zone,
+       ((s AT TIME ZONE z.zone)::jtimestamp - st.step)::timestamp AT TIME ZONE z.zone AS start_at,
+       st.step,
+       ((s AT TIME ZONE z.zone)::jtimestamp + st.step * 4)::timestamp AT TIME ZONE z.zone AS finish_at
+FROM zones z
+CROSS JOIN LATERAL generate_series(z.from_ts, z.to_ts, interval '90 minutes') s
+CROSS JOIN month_steps st;
+-- ... and the series does reach them: with a step that has no time part the wall
+-- time of day stays the same, unless a gap moved it (the witness that the cases
+-- above are not all away from the clock changes)
+SELECT count(*) > 0 AS gap_cases_exist,
+       count(*) FILTER (WHERE st.step::text !~ ':'
+                          AND EXISTS (SELECT 1 FROM jgenerate_series(start_at::jtimestamptz, finish_at::jtimestamptz, step, zone) g
+                                      WHERE (g::timestamptz AT TIME ZONE zone)::time <> (start_at AT TIME ZONE zone)::time)) > 0 AS series_move_through_gaps,
+       count(*) FILTER (WHERE NOT pg_temp.same_as_model_tz(zone, start_at, finish_at, step)) AS jtimestamptz_differs,
+       count(*) FILTER (WHERE NOT pg_temp.zone_arg_same_as_session(zone, start_at, finish_at, step)) AS zone_arg_differs
+FROM gap_cases st;
+
+-- jtimestamp = core's timestamp for steps without a month
+SELECT count(*) > 0 AS cases_exist,
+       count(*) FILTER (WHERE array(SELECT g::timestamp FROM jgenerate_series(start_at::timestamp::jtimestamp, finish_at::timestamp::jtimestamp, step) g)
+                              <> array(SELECT g FROM generate_series(start_at::timestamp, finish_at::timestamp, step) g)) AS differ_from_core
+FROM cases;
+-- jdate series with an interval step = the jtimestamp series of the midnights
+SELECT count(*) > 0 AS cases_exist,
+       count(*) FILTER (WHERE array(SELECT g FROM jgenerate_series(jdate '1403-01-31' + n, jdate '1404-12-29' - n, step) g)
+                              <> array(SELECT g FROM jgenerate_series((jdate '1403-01-31' + n)::jtimestamp, (jdate '1404-12-29' - n)::jtimestamp, step) g)) AS differ
+FROM generate_series(0, 40) n
+CROSS JOIN (VALUES (interval '1 day'), (interval '1 month'), (interval '1 year'), (interval '6 hours'), (interval '1 month 1 day')) st(step);
+
+-- ---------------------------------------------------------------------
+-- the model: element n + 1 = element n + step with the + operator, for steps with
+-- and without a month, in jtimestamp and jtimestamptz in four zones (clock changes
+-- included), and the zone argument against the session zone for the months too
+-- ---------------------------------------------------------------------
+SELECT count(*) > 0 AS cases_exist,
+       count(*) FILTER (WHERE array(SELECT g FROM jgenerate_series(start_at::timestamp::jtimestamp, finish_at::timestamp::jtimestamp, step) g)
+                              <> pg_temp.model_ts(start_at::timestamp::jtimestamp, finish_at::timestamp::jtimestamp, step)) AS jtimestamp_differs
+FROM (SELECT * FROM cases UNION ALL SELECT * FROM month_cases) c;
+
+SELECT count(*) > 0 AS cases_exist,
+       count(*) FILTER (WHERE NOT pg_temp.same_as_model_tz(zone, start_at, finish_at, step)) AS jtimestamptz_differs,
+       count(*) FILTER (WHERE NOT pg_temp.zone_arg_same_as_session(zone, start_at, finish_at, step)) AS zone_arg_differs
+FROM (SELECT * FROM cases UNION ALL SELECT * FROM month_cases) c;
+-- the negative control for the model comparison: a model that adds the step to the
+-- start n times (no drift) is not the series
+SELECT count(*) > 0 AS drift_cases_exist,
+       count(*) FILTER (WHERE array(SELECT g FROM jgenerate_series(jtimestamp '1403-01-31', jtimestamp '1406-01-31', interval '1 month' * m) g)
+                              <> array(SELECT jtimestamp '1403-01-31' + interval '1 month' * m * k
+                                       FROM generate_series(0, 36 / m) k
+                                       WHERE jtimestamp '1403-01-31' + interval '1 month' * m * k <= jtimestamp '1406-01-31')) AS no_drift_model_differs
+FROM generate_series(1, 6) m;
+
+-- the same from every day of 1403 and 1404 (the last days of every month, the leap
+-- Esfand 30 of 1403 and the Esfand 29 of 1404 included) with month, year and mixed
+-- steps, both directions
+SELECT count(*) AS cases,
+       count(*) FILTER (WHERE array(SELECT g FROM jgenerate_series(d::jtimestamp, (d + 800)::jtimestamp, st.step) g)
+                              <> pg_temp.model_ts(d::jtimestamp, (d + 800)::jtimestamp, st.step)) AS up_differs,
+       count(*) FILTER (WHERE array(SELECT g FROM jgenerate_series((d + 800)::jtimestamp, d::jtimestamp, -st.step) g)
+                              <> pg_temp.model_ts((d + 800)::jtimestamp, d::jtimestamp, -st.step)) AS down_differs
+FROM jgenerate_series(jdate '1403-01-01', jdate '1404-12-29') d
+CROSS JOIN (VALUES (interval '1 month'), (interval '1 year'), (interval '2 months 3 days'),
+                   (interval '1 month 6 hours')) st(step);

@@ -1276,3 +1276,40 @@ CREATE OPERATOR + (
     LEFTARG = timetz, RIGHTARG = jdate, PROCEDURE = timetz_pl_jdate,
     COMMUTATOR = +
 );
+
+-- ============================================================
+-- jgenerate_series
+-- ============================================================
+--
+-- Core's generate_series is not overloaded for these types: a bare literal would
+-- silently pick the Gregorian calendar, so the functions have their own name, and
+-- a call whose arguments are all bare literals is ambiguous (42725) instead.
+--
+-- jgenerate_series(jtimestamp, jtimestamp, interval) is IMMUTABLE;
+-- jgenerate_series(jtimestamptz, jtimestamptz, interval) is STABLE (it steps on the
+-- wall clock of the session zone) and the form with a zone name as fourth argument
+-- is IMMUTABLE, as in core. jgenerate_series(jdate, jdate, interval) returns
+-- jtimestamp (the midnights of the days, as core's date version returns
+-- timestamptz) and jgenerate_series(jdate, jdate, int) returns the days
+-- themselves, one per step of that many days (default 1).
+--
+-- As in core, element n + 1 is element n plus the step, so the clamp of a month
+-- step to the last day of a shorter month sticks, and a step with a month part is
+-- counted in Jalali months. Days keep the wall time across a daylight saving
+-- change. A zero step is 22023, as in core, and so is an infinite step (PostgreSQL
+-- 17 and later) and, unlike in core 18, an infinite endpoint. Every element is
+-- range-checked; a series may run up to the last or down to the first
+-- representable value, and ends there instead of failing on the element after it.
+--
+-- The C code is in src/jtimestamp_series.c.
+
+CREATE FUNCTION jgenerate_series(jtimestamp, jtimestamp, interval) RETURNS SETOF jtimestamp
+    AS 'MODULE_PATHNAME', 'jgenerate_series_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jgenerate_series(jtimestamptz, jtimestamptz, interval) RETURNS SETOF jtimestamptz
+    AS 'MODULE_PATHNAME', 'jgenerate_series_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jgenerate_series(jtimestamptz, jtimestamptz, interval, text) RETURNS SETOF jtimestamptz
+    AS 'MODULE_PATHNAME', 'jgenerate_series_jtimestamptz_zone' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jgenerate_series(jdate, jdate, interval) RETURNS SETOF jtimestamp
+    AS 'MODULE_PATHNAME', 'jgenerate_series_jdate_interval' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jgenerate_series(jdate, jdate, int DEFAULT 1) RETURNS SETOF jdate
+    AS 'MODULE_PATHNAME', 'jgenerate_series_jdate' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
