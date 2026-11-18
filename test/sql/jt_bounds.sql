@@ -429,7 +429,7 @@ FROM (VALUES ('first day', '-0061-01-01'), ('second day', '-0061-01-02'),
              ('day before the last', '3177-12-28'), ('last day', '3177-12-29')) AS d(label, v),
      bfix f
 GROUP BY d.label, d.v
-ORDER BY d.v;
+ORDER BY d.v COLLATE "C";
 SET timezone = 'UTC';
 
 -- ... and the first valid instant and the last one, shown as a local clock

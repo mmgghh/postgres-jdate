@@ -361,7 +361,7 @@ SELECT a.aggfnoid::regprocedure AS aggregate,
        a.aggtransfn = a.aggcombinefn AS combine_is_transfn
 FROM pg_aggregate a JOIN pg_proc p ON p.oid = a.aggfnoid
 WHERE a.aggfnoid IN ('min(jtimestamp)'::regprocedure, 'max(jtimestamp)'::regprocedure)
-ORDER BY a.aggfnoid::regprocedure::text;
+ORDER BY a.aggfnoid::regprocedure::text COLLATE "C";
     aggregate    |      transfn       |     combinefn      |          sortop          | parallel | combine_is_transfn 
 -----------------+--------------------+--------------------+--------------------------+----------+--------------------
  max(jtimestamp) | jtimestamp_larger  | jtimestamp_larger  | >(jtimestamp,jtimestamp) | s        | t
@@ -820,7 +820,7 @@ SELECT a.aggfnoid::regprocedure AS aggregate,
        a.aggtransfn = a.aggcombinefn AS combine_is_transfn
 FROM pg_aggregate a JOIN pg_proc p ON p.oid = a.aggfnoid
 WHERE a.aggfnoid IN ('min(jtimestamptz)'::regprocedure, 'max(jtimestamptz)'::regprocedure)
-ORDER BY a.aggfnoid::regprocedure::text;
+ORDER BY a.aggfnoid::regprocedure::text COLLATE "C";
      aggregate     |       transfn        |      combinefn       |            sortop            | parallel | combine_is_transfn 
 -------------------+----------------------+----------------------+------------------------------+----------+--------------------
  max(jtimestamptz) | jtimestamptz_larger  | jtimestamptz_larger  | >(jtimestamptz,jtimestamptz) | s        | t

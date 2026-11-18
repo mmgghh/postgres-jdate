@@ -46,7 +46,7 @@ JOIN pg_proc o ON o.proname = 'jdate_bin'
               AND o.proargtypes = format('%s %s %s', 'interval'::regtype::oid, m.jt::oid, m.jt::oid)::oidvector
 JOIN pg_proc c ON c.proname = 'date_bin' AND c.pronamespace = 'pg_catalog'::regnamespace
               AND c.proargtypes = format('%s %s %s', 'interval'::regtype::oid, m.core::oid, m.core::oid)::oidvector
-ORDER BY o.oid::regprocedure::text;
+ORDER BY o.oid::regprocedure::text COLLATE "C";
 
 SELECT count(*) AS jdate_bin_functions FROM pg_proc WHERE proname = 'jdate_bin';
 
@@ -133,7 +133,7 @@ FROM (VALUES
     ('first instant, origin the last, 1 day stride', $$SELECT jdate_bin('1 day', '-0061-01-01 00:00:00'::jtimestamp, '3177-12-29 23:59:59.999999'::jtimestamp)$$, 'ERR 22008'),
     ('first instant, origin the last, huge stride', $$SELECT jdate_bin('1000000 days', '-0061-01-01 00:00:00'::jtimestamp, '3177-12-29 23:59:59.999999'::jtimestamp)$$, 'ERR 22008')
 ) v(label, q, expect)
-ORDER BY label;
+ORDER BY label COLLATE "C";
 
 -- ---------------------------------------------------------------------
 -- jtimestamp against core's date_bin: 9 sources x 8 origins x 14 strides = 1008
@@ -244,7 +244,7 @@ FROM (VALUES
     ('first instant, origin the last, 1 microsecond stride', $$SELECT jdate_bin('1 microsecond', '-0061-01-01 16:00:00+00'::jtimestamptz, '3177-12-29 07:59:59.999999+00'::jtimestamptz)$$, '-0061-01-01 16:00:00+00'),
     ('first instant, origin the last, 1 day stride', $$SELECT jdate_bin('1 day', '-0061-01-01 16:00:00+00'::jtimestamptz, '3177-12-29 07:59:59.999999+00'::jtimestamptz)$$, 'ERR 22008')
 ) v(label, q, expect)
-ORDER BY label;
+ORDER BY label COLLATE "C";
 
 -- the first and the last valid instant as bin starts display in every zone,
 -- including the largest offsets (the point of the safe range)
@@ -252,7 +252,7 @@ SELECT z.name,
        pg_temp.zval(z.zone, $$SELECT jdate_bin('1 day', '-0061-01-01 16:00:00+00'::jtimestamptz, '-0061-01-01 16:00:00+00'::jtimestamptz)$$) AS first_instant,
        pg_temp.zval(z.zone, $$SELECT jdate_bin('1 day', '3177-12-29 07:59:59.999999+00'::jtimestamptz, '3177-12-29 07:59:59.999999+00'::jtimestamptz)$$) AS last_instant
 FROM (VALUES ('+15:59', '<+15:59>-15:59'), ('-15:59', '<-15:59>+15:59')) z(name, zone)
-ORDER BY 1;
+ORDER BY z.name COLLATE "C";
 
 -- errors and infinity, as core (the result shown through the cast to timestamptz, in UTC)
 SELECT label, ours, core, ours = core AS same
@@ -330,7 +330,7 @@ BEGIN
 END
 $f$;
 SELECT pg_temp.run_sweep_tz(z) FROM unnest(ARRAY['UTC', 'Asia/Tehran', 'Europe/Paris', '<+15:59>-15:59']) z;
-SELECT * FROM sweep_tz_res ORDER BY zone;
+SELECT * FROM sweep_tz_res ORDER BY zone COLLATE "C";
 
 -- ---------------------------------------------------------------------
 -- IMMUTABLE: a generated column and an expression index take jdate_bin; the

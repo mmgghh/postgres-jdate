@@ -233,7 +233,7 @@ SELECT a.aggfnoid::regprocedure AS aggregate,
        a.aggtransfn = a.aggcombinefn AS combine_is_transfn
 FROM pg_aggregate a JOIN pg_proc p ON p.oid = a.aggfnoid
 WHERE a.aggfnoid IN ('min(jtimestamp)'::regprocedure, 'max(jtimestamp)'::regprocedure)
-ORDER BY a.aggfnoid::regprocedure::text;
+ORDER BY a.aggfnoid::regprocedure::text COLLATE "C";
 
 -- the result has the type of the column, not a core type reached through a cast
 SELECT pg_typeof(min(v)) AS min_type, pg_typeof(max(v)) AS max_type FROM jh_ts_vals;
@@ -480,7 +480,7 @@ SELECT a.aggfnoid::regprocedure AS aggregate,
        a.aggtransfn = a.aggcombinefn AS combine_is_transfn
 FROM pg_aggregate a JOIN pg_proc p ON p.oid = a.aggfnoid
 WHERE a.aggfnoid IN ('min(jtimestamptz)'::regprocedure, 'max(jtimestamptz)'::regprocedure)
-ORDER BY a.aggfnoid::regprocedure::text;
+ORDER BY a.aggfnoid::regprocedure::text COLLATE "C";
 
 -- the result has the type of the column, not a core type reached through a cast
 SELECT pg_typeof(min(v)) AS min_type, pg_typeof(max(v)) AS max_type FROM jh_tz_vals;

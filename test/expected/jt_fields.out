@@ -69,7 +69,7 @@ SELECT p.pronamespace::regnamespace AS schema, p.proname,
 FROM pg_proc p
 WHERE p.proname IN ('extract', 'jdate_part')
   AND p.proargtypes[1] IN ('jtimestamp'::regtype, 'jtimestamptz'::regtype)
-ORDER BY p.proname, p.proargtypes[1]::regtype::text;
+ORDER BY p.proname, p.proargtypes[1]::regtype::text COLLATE "C";
    schema   |  proname   |        args        | rettype | provolatile | proparallel | proisstrict 
 ------------+------------+--------------------+---------+-------------+-------------+-------------
  pg_catalog | extract    | text, jtimestamp   | numeric | i           | s           | t
@@ -368,7 +368,7 @@ FROM (
            pg_catalog.extract(u, j) = jdate_part(u, j)
     FROM sw_ts, unnest(ARRAY['year', 'month', 'day', 'hour', 'second', 'epoch']) AS x(u)
 ) c
-GROUP BY kind ORDER BY kind;
+GROUP BY kind ORDER BY kind COLLATE "C";
           kind          | checks | bad 
 ------------------------+--------+-----
  date fields as jdate   | 258327 |   0

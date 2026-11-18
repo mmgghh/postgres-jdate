@@ -83,7 +83,7 @@ FROM pg_proc p
 JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
                 AND d.deptype = 'e' AND d.refclassid = 'pg_extension'::regclass
 WHERE p.proname = 'jgenerate_series'
-ORDER BY p.oid::regprocedure::text;
+ORDER BY p.oid::regprocedure::text COLLATE "C";
 
 -- ---------------------------------------------------------------------
 -- month steps from 1403-01-31: the clamp sticks. Farvardin to Shahrivar have 31

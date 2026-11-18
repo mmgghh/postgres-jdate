@@ -79,14 +79,14 @@ SELECT pg_get_function_identity_arguments(p.oid) AS args, p.prorettype::regtype 
                  AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'jdate')) AS in_extension
 FROM pg_proc p
 WHERE p.proname = 'jdate_trunc' AND p.pronamespace = (SELECT extnamespace FROM pg_extension WHERE extname = 'jdate')
-ORDER BY 1;
+ORDER BY pg_get_function_identity_arguments(p.oid) COLLATE "C";
 
 SELECT pg_get_function_identity_arguments(p.oid) AS core_args, p.provolatile AS core_volatility
 FROM pg_proc p
 WHERE p.proname = 'date_trunc' AND p.pronamespace = 'pg_catalog'::regnamespace
   AND p.proargtypes[0] = 'text'::regtype
   AND p.proargtypes[1] IN ('timestamp'::regtype, 'timestamptz'::regtype)
-ORDER BY 1;
+ORDER BY pg_get_function_identity_arguments(p.oid) COLLATE "C";
 
 -- ---------------------------------------------------------------------
 -- jtimestamp: every unit of 1403-05-15 10:30:45.123456, by hand. 1403-05-15 is a
@@ -504,7 +504,7 @@ FROM (SELECT pg_temp.edge_check(z, u, t::jtimestamptz) AS result
                          ('-0061-01-05 12:00:00+00'), ('-0061-01-10 12:00:00+00'),
                          ('3177-12-28 12:00:00+00'), ('3177-12-29 00:00:00+00'),
                          ('3177-12-29 07:59:59.999999+00')) AS e(t)) s
-GROUP BY result ORDER BY result;
+GROUP BY result ORDER BY result COLLATE "C";
 
 -- ---------------------------------------------------------------------
 -- infinity: infinity of the same sign for every known unit (the unsupported ones

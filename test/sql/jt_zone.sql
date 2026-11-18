@@ -52,7 +52,7 @@ JOIN pg_proc p ON p.pronamespace = 'pg_catalog'::regnamespace AND p.proname = 't
               AND p.proargtypes = format('%s %s', m.zone::regtype::oid, m.jt::regtype::oid)::oidvector
 JOIN pg_proc c ON c.pronamespace = 'pg_catalog'::regnamespace AND c.proname = 'timezone'
               AND c.proargtypes = format('%s %s', m.zone::regtype::oid, m.core::regtype::oid)::oidvector
-ORDER BY p.oid::regprocedure::text;
+ORDER BY p.oid::regprocedure::text COLLATE "C";
 
 SELECT count(*) AS timezone_functions_of_our_types,
        count(*) FILTER (WHERE pronargs = 1) AS at_local_forms
@@ -72,7 +72,7 @@ JOIN pg_proc p ON p.pronamespace = 'pg_catalog'::regnamespace AND p.proname = 'o
               AND p.proargtypes = format('%s %s %s %s', m.jt::regtype::oid, m.jt::regtype::oid, m.jt::regtype::oid, m.jt::regtype::oid)::oidvector
 JOIN pg_proc c ON c.pronamespace = 'pg_catalog'::regnamespace AND c.proname = 'overlaps'
               AND c.proargtypes = format('%s %s %s %s', m.core::regtype::oid, m.core::regtype::oid, m.core::regtype::oid, m.core::regtype::oid)::oidvector
-ORDER BY p.oid::regprocedure::text;
+ORDER BY p.oid::regprocedure::text COLLATE "C";
 
 SELECT count(*) AS overlaps_functions_of_our_types,
        count(*) FILTER (WHERE proargtypes::oid[] @> ARRAY['interval'::regtype::oid]) AS with_an_interval_end
@@ -211,7 +211,7 @@ FROM (VALUES
     ('POSIX -15:59, last valid',         $$SELECT ('3177-12-28 16:00:59.999999'::jtimestamp AT TIME ZONE '<-15:59>+15:59')::text$$, '3177-12-29 07:59:59.999999+00'),
     ('POSIX -15:59, 1 us after',         $$SELECT ('3177-12-28 16:01:00'::jtimestamp AT TIME ZONE '<-15:59>+15:59')::text$$, 'ERR 22008')
 ) v(label, q, expect)
-ORDER BY label;
+ORDER BY label COLLATE "C";
 
 -- an instant of the safe range has a wall clock in the Jalali range in every zone
 -- core allows by name (offsets up to 15:59:59): this direction cannot fail there
@@ -219,7 +219,7 @@ SELECT z.name,
        ('-0061-01-01 16:00:00+00'::jtimestamptz AT TIME ZONE z.zone) AS first_valid_instant,
        ('3177-12-29 07:59:59.999999+00'::jtimestamptz AT TIME ZONE z.zone) AS last_valid_instant
 FROM (VALUES ('+15:59', '<+15:59>-15:59'), ('-15:59', '<-15:59>+15:59'), ('UTC', 'UTC')) z(name, zone)
-ORDER BY z.name;
+ORDER BY z.name COLLATE "C";
 
 -- core accepts any interval offset, so with one beyond 16 hours the result of this
 -- direction can leave the Jalali range too
@@ -232,7 +232,7 @@ FROM (VALUES
     ('jtimestamp, first, 20 hours east',    $$SELECT ('-0061-01-02 12:00:00'::jtimestamp AT TIME ZONE interval '20:00')::text$$, '-0061-01-01 16:00:00+00'),
     ('jtimestamp, 1 us before that',        $$SELECT ('-0061-01-02 11:59:59.999999'::jtimestamp AT TIME ZONE interval '20:00')::text$$, 'ERR 22008')
 ) v(label, q, expect)
-ORDER BY label;
+ORDER BY label COLLATE "C";
 
 -- ---------------------------------------------------------------------
 -- infinity, NULL and errors, as core: the same SQLSTATE or value for the same
@@ -312,7 +312,7 @@ FROM (VALUES ('Asia/Tehran', '2020-03-21'::timestamptz), ('Asia/Tehran', '2020-0
              ('Europe/Paris', '2024-03-31'), ('Europe/Paris', '2024-10-27')) c(zone, d),
      LATERAL generate_series(d - interval '26 hours', d + interval '30 hours', interval '15 minutes') t
 GROUP BY zone, d
-ORDER BY zone, d;
+ORDER BY zone COLLATE "C", d;
 
 SELECT z.zone, count(*) AS wall_times,
        count(*) FILTER (WHERE (g.wall AT TIME ZONE z.zone)::timestamptz
@@ -322,7 +322,7 @@ SELECT z.zone, count(*) AS wall_times,
 FROM zone_grid g,
      (VALUES ('Asia/Tehran'), ('Asia/Kolkata'), ('Asia/Kathmandu'), ('Europe/Paris'), ('UTC')) z(zone)
 GROUP BY z.zone
-ORDER BY z.zone;
+ORDER BY z.zone COLLATE "C";
 
 -- the comparison can fail: against core's answer in the wrong zone it finds mismatches
 SELECT count(*) FILTER (WHERE (g.wall AT TIME ZONE 'Asia/Tehran')::timestamptz
@@ -341,7 +341,7 @@ FROM (SELECT g AS ts FROM jgenerate_series('1380-01-01 12:00:00'::jtimestamp, '1
       SELECT g FROM jgenerate_series('1380-01-01 18:00:00'::jtimestamp, '1404-12-29 18:00:00'::jtimestamp, interval '1 day') g) w,
      (VALUES ('Asia/Tehran'), ('Asia/Kolkata'), ('Asia/Kathmandu'), ('Europe/Paris'), ('UTC')) z(zone)
 GROUP BY z.zone
-ORDER BY z.zone;
+ORDER BY z.zone COLLATE "C";
 SELECT z.zone, count(*) AS instants,
        count(*) FILTER (WHERE (i.ts AT TIME ZONE z.zone) AT TIME ZONE z.zone <> i.ts) AS instant_round_trip_failures
 FROM (SELECT g AS ts FROM jgenerate_series('1380-01-01 12:00:00+00'::jtimestamptz, '1404-12-29 12:00:00+00'::jtimestamptz, interval '1 day') g
@@ -349,7 +349,7 @@ FROM (SELECT g AS ts FROM jgenerate_series('1380-01-01 12:00:00+00'::jtimestampt
       SELECT g FROM jgenerate_series('1380-01-01 18:00:00+00'::jtimestamptz, '1404-12-29 18:00:00+00'::jtimestamptz, interval '1 day') g) i,
      (VALUES ('Asia/Tehran'), ('Asia/Kolkata'), ('Asia/Kathmandu'), ('Europe/Paris'), ('UTC')) z(zone)
 GROUP BY z.zone
-ORDER BY z.zone;
+ORDER BY z.zone COLLATE "C";
 
 -- ---------------------------------------------------------------------
 -- bare literals: AT TIME ZONE keeps resolving a bare literal to core's
@@ -514,7 +514,7 @@ BEGIN
 END
 $f$;
 SELECT pg_temp.run_ov_tz(z) FROM unnest(ARRAY['UTC', 'Asia/Tehran', 'Europe/Paris', '<+15:59>-15:59']) z;
-SELECT * FROM ov_tz_res ORDER BY zone;
+SELECT * FROM ov_tz_res ORDER BY zone COLLATE "C";
 
 -- the forms with an interval end are not provided (core would add Gregorian months to a
 -- Jalali value): 42883 for both types, while core has them for its own types

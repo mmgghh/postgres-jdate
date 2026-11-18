@@ -73,7 +73,7 @@ SELECT p.pronamespace::regnamespace AS schema, p.proname,
 FROM pg_proc p
 WHERE p.proname IN ('extract', 'jdate_part')
   AND p.proargtypes[1] IN ('jtimestamp'::regtype, 'jtimestamptz'::regtype)
-ORDER BY p.proname, p.proargtypes[1]::regtype::text;
+ORDER BY p.proname, p.proargtypes[1]::regtype::text COLLATE "C";
 
 -- the jdate versions are untouched: jdate_part is still bigint
 SELECT p.proname, p.prorettype::regtype AS rettype, p.provolatile
@@ -262,7 +262,7 @@ FROM (
            pg_catalog.extract(u, j) = jdate_part(u, j)
     FROM sw_ts, unnest(ARRAY['year', 'month', 'day', 'hour', 'second', 'epoch']) AS x(u)
 ) c
-GROUP BY kind ORDER BY kind;
+GROUP BY kind ORDER BY kind COLLATE "C";
 
 -- negative control: the Gregorian day of the same value differs from the Jalali
 -- day (and the dow too: Saturday-first), so the same comparison must fail

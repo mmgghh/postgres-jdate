@@ -44,7 +44,7 @@ JOIN pg_proc o ON o.proname = 'jdate_bin'
               AND o.proargtypes = format('%s %s %s', 'interval'::regtype::oid, m.jt::oid, m.jt::oid)::oidvector
 JOIN pg_proc c ON c.proname = 'date_bin' AND c.pronamespace = 'pg_catalog'::regnamespace
               AND c.proargtypes = format('%s %s %s', 'interval'::regtype::oid, m.core::oid, m.core::oid)::oidvector
-ORDER BY o.oid::regprocedure::text;
+ORDER BY o.oid::regprocedure::text COLLATE "C";
                    function                    |   returns    | volatility | strict | parallel | same_flags_as_core 
 -----------------------------------------------+--------------+------------+--------+----------+--------------------
  jdate_bin(interval,jtimestamp,jtimestamp)     | jtimestamp   | i          | t      | s        | t
@@ -183,7 +183,7 @@ FROM (VALUES
     ('first instant, origin the last, 1 day stride', $$SELECT jdate_bin('1 day', '-0061-01-01 00:00:00'::jtimestamp, '3177-12-29 23:59:59.999999'::jtimestamp)$$, 'ERR 22008'),
     ('first instant, origin the last, huge stride', $$SELECT jdate_bin('1000000 days', '-0061-01-01 00:00:00'::jtimestamp, '3177-12-29 23:59:59.999999'::jtimestamp)$$, 'ERR 22008')
 ) v(label, q, expect)
-ORDER BY label;
+ORDER BY label COLLATE "C";
                         label                         |           result            |           expect            
 ------------------------------------------------------+-----------------------------+-----------------------------
  first instant, origin 1 us later                     | ERR 22008                   | ERR 22008
@@ -333,7 +333,7 @@ FROM (VALUES
     ('first instant, origin the last, 1 microsecond stride', $$SELECT jdate_bin('1 microsecond', '-0061-01-01 16:00:00+00'::jtimestamptz, '3177-12-29 07:59:59.999999+00'::jtimestamptz)$$, '-0061-01-01 16:00:00+00'),
     ('first instant, origin the last, 1 day stride', $$SELECT jdate_bin('1 day', '-0061-01-01 16:00:00+00'::jtimestamptz, '3177-12-29 07:59:59.999999+00'::jtimestamptz)$$, 'ERR 22008')
 ) v(label, q, expect)
-ORDER BY label;
+ORDER BY label COLLATE "C";
                         label                         |            result             |            expect             
 ------------------------------------------------------+-------------------------------+-------------------------------
  first instant, origin 1 us later                     | ERR 22008                     | ERR 22008
@@ -354,7 +354,7 @@ SELECT z.name,
        pg_temp.zval(z.zone, $$SELECT jdate_bin('1 day', '-0061-01-01 16:00:00+00'::jtimestamptz, '-0061-01-01 16:00:00+00'::jtimestamptz)$$) AS first_instant,
        pg_temp.zval(z.zone, $$SELECT jdate_bin('1 day', '3177-12-29 07:59:59.999999+00'::jtimestamptz, '3177-12-29 07:59:59.999999+00'::jtimestamptz)$$) AS last_instant
 FROM (VALUES ('+15:59', '<+15:59>-15:59'), ('-15:59', '<-15:59>+15:59')) z(name, zone)
-ORDER BY 1;
+ORDER BY z.name COLLATE "C";
   name  |       first_instant        |           last_instant           
 --------+----------------------------+----------------------------------
  +15:59 | -0061-01-02 07:59:00+15:59 | 3177-12-29 23:58:59.999999+15:59
@@ -459,7 +459,7 @@ SELECT pg_temp.run_sweep_tz(z) FROM unnest(ARRAY['UTC', 'Asia/Tehran', 'Europe/P
  
 (4 rows)
 
-SELECT * FROM sweep_tz_res ORDER BY zone;
+SELECT * FROM sweep_tz_res ORDER BY zone COLLATE "C";
       zone      | cases | same_as_core | range_check_fired | values_returned | mismatches 
 ----------------+-------+--------------+-------------------+-----------------+------------
  <+15:59>-15:59 |  1008 |          888 |               120 |             600 |          0

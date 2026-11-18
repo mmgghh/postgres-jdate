@@ -79,7 +79,7 @@ FROM pg_proc p
 JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
                 AND d.deptype = 'e' AND d.refclassid = 'pg_extension'::regclass
 WHERE p.proname = 'jgenerate_series'
-ORDER BY p.oid::regprocedure::text;
+ORDER BY p.oid::regprocedure::text COLLATE "C";
                          function                          |   returns    | setof | volatility | strict | parallel | defaults 
 -----------------------------------------------------------+--------------+-------+------------+--------+----------+----------
  jgenerate_series(jdate,jdate,integer)                     | jdate        | t     | i          | t      | s        |        1
