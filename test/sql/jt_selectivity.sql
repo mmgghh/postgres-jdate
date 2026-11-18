@@ -1,0 +1,175 @@
+-- Row estimates of range predicates on jdate, jtimestamp and jtimestamptz
+-- (the RESTRICT estimators jdatetime_ltsel, _lesel, _gtsel, _gesel in
+-- src/jselectivity.c). With core's scalarltsel and friends a narrow two-sided
+-- predicate that falls inside one histogram bucket was estimated at 1 row, or
+-- at one whole bucket, because core cannot interpolate inside a bucket for an
+-- extension type. Every check here is a boolean: the planner's row estimate is
+-- within a factor of 2 of the rows the query really returns, for the core type
+-- and for the Jalali type alike (the core columns are the control). Plans and
+-- estimates are never printed.
+--
+-- The table has 100000 rows, one per minute (1440 a day, about 69 days). The
+-- histogram is cut to 10 buckets (about 7 days, 10000 rows each) so that the
+-- one-day and three-day windows below lie inside one bucket, which is where
+-- the old estimate was wrong. A padding column with a high statistics target
+-- makes ANALYZE read every row, so the histograms do not depend on a random
+-- sample.
+SET DateStyle = 'ISO, YMD';
+SET timezone = 'UTC';
+SET max_parallel_workers_per_gather = 0;
+\set VERBOSITY sqlstate
+
+CREATE TABLE jt_sel (
+    pad int,
+    d date, ts timestamp, tz timestamptz,
+    jd jdate, jts jtimestamp, jtz jtimestamptz);
+INSERT INTO jt_sel
+SELECT i, x::date, x, x::timestamptz,
+       x::date::jdate, x::jtimestamp, x::timestamptz::jtimestamptz
+FROM (SELECT i, timestamp '2000-01-01' + i * interval '1 minute' AS x
+      FROM generate_series(0, 99999) i) s;
+ALTER TABLE jt_sel ALTER COLUMN pad SET STATISTICS 500;
+ALTER TABLE jt_sel ALTER COLUMN d SET STATISTICS 10;
+ALTER TABLE jt_sel ALTER COLUMN ts SET STATISTICS 10;
+ALTER TABLE jt_sel ALTER COLUMN tz SET STATISTICS 10;
+ALTER TABLE jt_sel ALTER COLUMN jd SET STATISTICS 10;
+ALTER TABLE jt_sel ALTER COLUMN jts SET STATISTICS 10;
+ALTER TABLE jt_sel ALTER COLUMN jtz SET STATISTICS 10;
+ANALYZE jt_sel;
+
+-- The estimate of the top plan node of a query.
+CREATE FUNCTION jt_sel_est(query text) RETURNS bigint
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan json;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO plan;
+    RETURN (plan -> 0 -> 'Plan' ->> 'Plan Rows')::bigint;
+END
+$$;
+
+-- The estimate is within a factor of 2 of the actual row count.
+CREATE FUNCTION jt_sel_ok(query text, actual bigint) RETURNS bool
+LANGUAGE sql AS $$
+    SELECT jt_sel_est(query) BETWEEN actual / 2.0 AND actual * 2.0
+$$;
+
+-- the six types: the column, the cast that turns a text literal into it, and
+-- the cast of a literal of the other kind (a date against the timestamp types,
+-- a timestamp against the date types) for the cross-type operators
+CREATE TABLE jt_sel_ty (ord int, ty text, col text, cst text, xcst text);
+INSERT INTO jt_sel_ty VALUES
+    (1, 'date', 'd', '::date', '::timestamp'),
+    (2, 'jdate', 'jd', '::date::jdate', '::timestamp::jtimestamp'),
+    (3, 'timestamp', 'ts', '::timestamp', '::date'),
+    (4, 'jtimestamp', 'jts', '::timestamp::jtimestamp', '::date::jdate'),
+    (5, 'timestamptz', 'tz', '::timestamptz', '::date'),
+    (6, 'jtimestamptz', 'jtz', '::timestamptz::jtimestamptz', '::date::jdate');
+
+-- The windows [lo, hi) of one and of three days, at different places relative
+-- to the bucket edges, and a second window [lo2, hi2) of the same width for the
+-- OR. act is the real row count of the window, act_or of both windows, act_ge
+-- of everything from lo on.
+CREATE TABLE jt_sel_w (w int, lo text, hi text, lo2 text, hi2 text,
+                       act bigint, act_or bigint, act_ge bigint);
+INSERT INTO jt_sel_w (w, lo, hi, lo2, hi2) VALUES
+    (1, '2000-01-06', '2000-01-07', '2000-02-20', '2000-02-21'),
+    (2, '2000-01-20', '2000-01-21', '2000-03-05', '2000-03-06'),
+    (3, '2000-02-03', '2000-02-04', '2000-01-15', '2000-01-16'),
+    (4, '2000-02-17', '2000-02-18', '2000-01-02', '2000-01-03'),
+    (5, '2000-03-02', '2000-03-03', '2000-02-10', '2000-02-11'),
+    (6, '2000-01-10', '2000-01-13', '2000-02-25', '2000-02-28'),
+    (7, '2000-02-08', '2000-02-11', '2000-01-24', '2000-01-27');
+UPDATE jt_sel_w w
+SET act = (SELECT count(*) FROM jt_sel WHERE d >= w.lo::date AND d < w.hi::date),
+    act_or = (SELECT count(*) FROM jt_sel
+              WHERE (d >= w.lo::date AND d < w.hi::date)
+                 OR (d >= w.lo2::date AND d < w.hi2::date)),
+    act_ge = (SELECT count(*) FROM jt_sel WHERE d >= w.lo::date);
+SELECT min(act) AS min_actual, max(act) AS max_actual FROM jt_sel_w;
+
+-- One row for a form of the predicate and one column for each type: true when
+-- the estimate is within a factor of 2 for all seven windows. The form takes
+-- (1) the column, (2) lo, (3) the cast, (4) hi, (5) lo2, (6) hi2 as format()
+-- placeholders; castcol picks the cast column of jt_sel_ty and actcol the
+-- column of jt_sel_w that holds the real row count.
+CREATE FUNCTION jt_sel_form(form text, castcol text DEFAULT 'cst',
+                            actcol text DEFAULT 'act')
+RETURNS TABLE (d bool, jd bool, ts bool, jts bool, tz bool, jtz bool)
+LANGUAGE plpgsql AS $$
+DECLARE
+    r jt_sel_ty;
+    ok bool;
+    res bool[] := '{}';
+BEGIN
+    FOR r IN SELECT * FROM jt_sel_ty ORDER BY ord LOOP
+        EXECUTE format(
+            'SELECT bool_and(jt_sel_ok(format(%L, %L, w.lo, %L, w.hi, w.lo2, w.hi2), w.%I)) FROM jt_sel_w w',
+            form, r.col, to_jsonb(r) ->> castcol, actcol) INTO ok;
+        res := res || ok;
+    END LOOP;
+    RETURN QUERY SELECT res[1], res[2], res[3], res[4], res[5], res[6];
+END
+$$;
+
+-- both bounds inclusive or exclusive
+SELECT * FROM jt_sel_form(
+    'SELECT * FROM jt_sel WHERE %1$s >= %2$L%3$s AND %1$s < %4$L%3$s');
+SELECT * FROM jt_sel_form(
+    'SELECT * FROM jt_sel WHERE %1$s > %2$L%3$s AND %1$s <= %4$L%3$s');
+-- BETWEEN is the same pair of bounds
+SELECT * FROM jt_sel_form(
+    'SELECT * FROM jt_sel WHERE %1$s BETWEEN %2$L%3$s AND %4$L%3$s');
+-- the constants on the left: the operators are commuted
+SELECT * FROM jt_sel_form(
+    'SELECT * FROM jt_sel WHERE %2$L%3$s <= %1$s AND %4$L%3$s > %1$s');
+-- one constant on each side
+SELECT * FROM jt_sel_form(
+    'SELECT * FROM jt_sel WHERE %1$s >= %2$L%3$s AND %4$L%3$s > %1$s');
+-- a pair of bounds inside each arm of an OR
+SELECT * FROM jt_sel_form(
+    'SELECT * FROM jt_sel WHERE (%1$s >= %2$L%3$s AND %1$s < %4$L%3$s) OR (%1$s >= %5$L%3$s AND %1$s < %6$L%3$s)',
+    'cst', 'act_or');
+-- one bound only (this was right before, and has to stay right)
+SELECT * FROM jt_sel_form(
+    'SELECT * FROM jt_sel WHERE %1$s >= %2$L%3$s', 'cst', 'act_ge');
+-- the cross-type operators: a date against a timestamp type and back
+SELECT * FROM jt_sel_form(
+    'SELECT * FROM jt_sel WHERE %1$s >= %2$L%3$s AND %1$s < %4$L%3$s', 'xcst');
+
+-- A generic plan has no constants to look at: the estimate of a Jalali type is
+-- the one of its core type (core's own default for a pair of bounds).
+SET plan_cache_mode = force_generic_plan;
+PREPARE jt_sel_g_d(date, date) AS
+    SELECT * FROM jt_sel WHERE d >= $1 AND d < $2;
+PREPARE jt_sel_g_jd(jdate, jdate) AS
+    SELECT * FROM jt_sel WHERE jd >= $1 AND jd < $2;
+PREPARE jt_sel_g_ts(timestamp, timestamp) AS
+    SELECT * FROM jt_sel WHERE ts >= $1 AND ts < $2;
+PREPARE jt_sel_g_jts(jtimestamp, jtimestamp) AS
+    SELECT * FROM jt_sel WHERE jts >= $1 AND jts < $2;
+PREPARE jt_sel_g_tz(timestamptz, timestamptz) AS
+    SELECT * FROM jt_sel WHERE tz >= $1 AND tz < $2;
+PREPARE jt_sel_g_jtz(jtimestamptz, jtimestamptz) AS
+    SELECT * FROM jt_sel WHERE jtz >= $1 AND jtz < $2;
+SELECT jt_sel_est('EXECUTE jt_sel_g_jd(''2000-01-06''::date::jdate, ''2000-01-07''::date::jdate)')
+       = jt_sel_est('EXECUTE jt_sel_g_d(''2000-01-06'', ''2000-01-07'')') AS jdate_like_date,
+       jt_sel_est('EXECUTE jt_sel_g_jts(''2000-01-06''::jtimestamp, ''2000-01-07''::jtimestamp)')
+       = jt_sel_est('EXECUTE jt_sel_g_ts(''2000-01-06'', ''2000-01-07'')') AS jtimestamp_like_timestamp,
+       jt_sel_est('EXECUTE jt_sel_g_jtz(''2000-01-06''::jtimestamptz, ''2000-01-07''::jtimestamptz)')
+       = jt_sel_est('EXECUTE jt_sel_g_tz(''2000-01-06'', ''2000-01-07'')') AS jtimestamptz_like_timestamptz;
+RESET plan_cache_mode;
+DEALLOCATE ALL;
+
+-- An expression has no statistics: the estimate is again the one of the core
+-- type (the pair of bounds on an expression is paired too).
+SELECT jt_sel_est('SELECT * FROM jt_sel WHERE jd + 1 >= ''2000-01-06''::date::jdate AND jd + 1 < ''2000-01-07''::date::jdate')
+       = jt_sel_est('SELECT * FROM jt_sel WHERE d + 1 >= ''2000-01-06''::date AND d + 1 < ''2000-01-07''::date') AS expression_like_date;
+
+DROP TABLE jt_sel, jt_sel_ty, jt_sel_w;
+DROP FUNCTION jt_sel_form(text, text, text);
+DROP FUNCTION jt_sel_ok(text, bigint);
+DROP FUNCTION jt_sel_est(text);
+RESET max_parallel_workers_per_gather;
+RESET DateStyle;
+RESET timezone;

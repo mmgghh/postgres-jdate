@@ -437,8 +437,10 @@ Because both exist, `jdate` columns work with btree and hash indexes, merge and
 hash joins, `HashAggregate`, `GROUP BY`/`DISTINCT`, `ORDER BY`, and `PARTITION
 BY HASH` (which needs the extended hash function). `amvalidate` accepts both
 classes. `=` is declared `HASHES, MERGES` with `eqsel`/`eqjoinsel`; the
-ordering operators use the `scalar*sel` estimators. `min`/`max` declare
-`SORTOP`. There are no GiST, GIN, BRIN or SP-GiST operator classes.
+ordering operators use the `jdatetime_{lt,le,gt,ge}sel` estimators (core's
+`scalar*sel` with the operands relabelled to the core type, and the pairing of
+a lower and an upper bound done in the estimator; `src/jselectivity.c`).
+`min`/`max` declare `SORTOP`. There are no GiST, GIN, BRIN or SP-GiST operator classes.
 
 `jdate` is a 4-byte day count with the same representation as `date`, so
 `jdate_ops` reuses core's `date_sortsupport` (support function 2, faster sorts

@@ -66,6 +66,21 @@ CREATE CAST (date AS jdate) WITH FUNCTION jdate(date) AS ASSIGNMENT;
 -- Comparison operators, btree + hash opclasses
 -- ============================================================
 
+-- Range-predicate estimators for the <, <=, > and >= operators of all three
+-- types (src/jselectivity.c). They stand in for core's scalarltsel and friends,
+-- which cannot interpolate inside a histogram bucket for an extension type and
+-- so estimate a narrow two-sided predicate at 1 row or one whole bucket. The
+-- JOIN estimators stay core's (scalarltjoinsel ...). Same signature, STABLE
+-- and PARALLEL SAFE as core's.
+CREATE FUNCTION jdatetime_ltsel(internal, oid, internal, integer) RETURNS float8
+    AS 'MODULE_PATHNAME', 'jdatetime_ltsel' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdatetime_lesel(internal, oid, internal, integer) RETURNS float8
+    AS 'MODULE_PATHNAME', 'jdatetime_lesel' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdatetime_gtsel(internal, oid, internal, integer) RETURNS float8
+    AS 'MODULE_PATHNAME', 'jdatetime_gtsel' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdatetime_gesel(internal, oid, internal, integer) RETURNS float8
+    AS 'MODULE_PATHNAME', 'jdatetime_gesel' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
 CREATE FUNCTION jdate_eq(jdate, jdate) RETURNS bool
     AS 'MODULE_PATHNAME', 'jdate_eq' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 CREATE FUNCTION jdate_ne(jdate, jdate) RETURNS bool
@@ -98,22 +113,22 @@ CREATE OPERATOR <> (
 CREATE OPERATOR < (
     LEFTARG = jdate, RIGHTARG = jdate, PROCEDURE = jdate_lt,
     COMMUTATOR = >, NEGATOR = >=,
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = jdatetime_ltsel, JOIN = scalarltjoinsel
 );
 CREATE OPERATOR <= (
     LEFTARG = jdate, RIGHTARG = jdate, PROCEDURE = jdate_le,
     COMMUTATOR = >=, NEGATOR = >,
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = jdatetime_lesel, JOIN = scalarlejoinsel
 );
 CREATE OPERATOR > (
     LEFTARG = jdate, RIGHTARG = jdate, PROCEDURE = jdate_gt,
     COMMUTATOR = <, NEGATOR = <=,
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = jdatetime_gtsel, JOIN = scalargtjoinsel
 );
 CREATE OPERATOR >= (
     LEFTARG = jdate, RIGHTARG = jdate, PROCEDURE = jdate_ge,
     COMMUTATOR = <=, NEGATOR = <,
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = jdatetime_gesel, JOIN = scalargejoinsel
 );
 
 -- One btree operator family for jdate, jtimestamp and jtimestamptz, as core's
@@ -582,22 +597,22 @@ CREATE OPERATOR <> (
 CREATE OPERATOR < (
     LEFTARG = jtimestamp, RIGHTARG = jtimestamp, PROCEDURE = jtimestamp_lt,
     COMMUTATOR = >, NEGATOR = >=,
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = jdatetime_ltsel, JOIN = scalarltjoinsel
 );
 CREATE OPERATOR <= (
     LEFTARG = jtimestamp, RIGHTARG = jtimestamp, PROCEDURE = jtimestamp_le,
     COMMUTATOR = >=, NEGATOR = >,
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = jdatetime_lesel, JOIN = scalarlejoinsel
 );
 CREATE OPERATOR > (
     LEFTARG = jtimestamp, RIGHTARG = jtimestamp, PROCEDURE = jtimestamp_gt,
     COMMUTATOR = <, NEGATOR = <=,
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = jdatetime_gtsel, JOIN = scalargtjoinsel
 );
 CREATE OPERATOR >= (
     LEFTARG = jtimestamp, RIGHTARG = jtimestamp, PROCEDURE = jtimestamp_ge,
     COMMUTATOR = <=, NEGATOR = <,
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = jdatetime_gesel, JOIN = scalargejoinsel
 );
 
 CREATE OPERATOR CLASS jtimestamp_ops
@@ -651,22 +666,22 @@ CREATE OPERATOR <> (
 CREATE OPERATOR < (
     LEFTARG = jtimestamptz, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamptz_lt,
     COMMUTATOR = >, NEGATOR = >=,
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = jdatetime_ltsel, JOIN = scalarltjoinsel
 );
 CREATE OPERATOR <= (
     LEFTARG = jtimestamptz, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamptz_le,
     COMMUTATOR = >=, NEGATOR = >,
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = jdatetime_lesel, JOIN = scalarlejoinsel
 );
 CREATE OPERATOR > (
     LEFTARG = jtimestamptz, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamptz_gt,
     COMMUTATOR = <, NEGATOR = <=,
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = jdatetime_gtsel, JOIN = scalargtjoinsel
 );
 CREATE OPERATOR >= (
     LEFTARG = jtimestamptz, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamptz_ge,
     COMMUTATOR = <=, NEGATOR = <,
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = jdatetime_gesel, JOIN = scalargejoinsel
 );
 
 CREATE OPERATOR CLASS jtimestamptz_ops
@@ -797,22 +812,22 @@ CREATE OPERATOR <> (
 CREATE OPERATOR < (
     LEFTARG = jdate, RIGHTARG = jtimestamp, PROCEDURE = jdate_lt_jtimestamp,
     COMMUTATOR = >, NEGATOR = >=,
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = jdatetime_ltsel, JOIN = scalarltjoinsel
 );
 CREATE OPERATOR <= (
     LEFTARG = jdate, RIGHTARG = jtimestamp, PROCEDURE = jdate_le_jtimestamp,
     COMMUTATOR = >=, NEGATOR = >,
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = jdatetime_lesel, JOIN = scalarlejoinsel
 );
 CREATE OPERATOR > (
     LEFTARG = jdate, RIGHTARG = jtimestamp, PROCEDURE = jdate_gt_jtimestamp,
     COMMUTATOR = <, NEGATOR = <=,
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = jdatetime_gtsel, JOIN = scalargtjoinsel
 );
 CREATE OPERATOR >= (
     LEFTARG = jdate, RIGHTARG = jtimestamp, PROCEDURE = jdate_ge_jtimestamp,
     COMMUTATOR = <=, NEGATOR = <,
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = jdatetime_gesel, JOIN = scalargejoinsel
 );
 
 ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
@@ -853,22 +868,22 @@ CREATE OPERATOR <> (
 CREATE OPERATOR < (
     LEFTARG = jtimestamp, RIGHTARG = jdate, PROCEDURE = jtimestamp_lt_jdate,
     COMMUTATOR = >, NEGATOR = >=,
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = jdatetime_ltsel, JOIN = scalarltjoinsel
 );
 CREATE OPERATOR <= (
     LEFTARG = jtimestamp, RIGHTARG = jdate, PROCEDURE = jtimestamp_le_jdate,
     COMMUTATOR = >=, NEGATOR = >,
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = jdatetime_lesel, JOIN = scalarlejoinsel
 );
 CREATE OPERATOR > (
     LEFTARG = jtimestamp, RIGHTARG = jdate, PROCEDURE = jtimestamp_gt_jdate,
     COMMUTATOR = <, NEGATOR = <=,
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = jdatetime_gtsel, JOIN = scalargtjoinsel
 );
 CREATE OPERATOR >= (
     LEFTARG = jtimestamp, RIGHTARG = jdate, PROCEDURE = jtimestamp_ge_jdate,
     COMMUTATOR = <=, NEGATOR = <,
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = jdatetime_gesel, JOIN = scalargejoinsel
 );
 
 ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
@@ -909,22 +924,22 @@ CREATE OPERATOR <> (
 CREATE OPERATOR < (
     LEFTARG = jdate, RIGHTARG = jtimestamptz, PROCEDURE = jdate_lt_jtimestamptz,
     COMMUTATOR = >, NEGATOR = >=,
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = jdatetime_ltsel, JOIN = scalarltjoinsel
 );
 CREATE OPERATOR <= (
     LEFTARG = jdate, RIGHTARG = jtimestamptz, PROCEDURE = jdate_le_jtimestamptz,
     COMMUTATOR = >=, NEGATOR = >,
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = jdatetime_lesel, JOIN = scalarlejoinsel
 );
 CREATE OPERATOR > (
     LEFTARG = jdate, RIGHTARG = jtimestamptz, PROCEDURE = jdate_gt_jtimestamptz,
     COMMUTATOR = <, NEGATOR = <=,
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = jdatetime_gtsel, JOIN = scalargtjoinsel
 );
 CREATE OPERATOR >= (
     LEFTARG = jdate, RIGHTARG = jtimestamptz, PROCEDURE = jdate_ge_jtimestamptz,
     COMMUTATOR = <=, NEGATOR = <,
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = jdatetime_gesel, JOIN = scalargejoinsel
 );
 
 ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
@@ -965,22 +980,22 @@ CREATE OPERATOR <> (
 CREATE OPERATOR < (
     LEFTARG = jtimestamptz, RIGHTARG = jdate, PROCEDURE = jtimestamptz_lt_jdate,
     COMMUTATOR = >, NEGATOR = >=,
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = jdatetime_ltsel, JOIN = scalarltjoinsel
 );
 CREATE OPERATOR <= (
     LEFTARG = jtimestamptz, RIGHTARG = jdate, PROCEDURE = jtimestamptz_le_jdate,
     COMMUTATOR = >=, NEGATOR = >,
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = jdatetime_lesel, JOIN = scalarlejoinsel
 );
 CREATE OPERATOR > (
     LEFTARG = jtimestamptz, RIGHTARG = jdate, PROCEDURE = jtimestamptz_gt_jdate,
     COMMUTATOR = <, NEGATOR = <=,
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = jdatetime_gtsel, JOIN = scalargtjoinsel
 );
 CREATE OPERATOR >= (
     LEFTARG = jtimestamptz, RIGHTARG = jdate, PROCEDURE = jtimestamptz_ge_jdate,
     COMMUTATOR = <=, NEGATOR = <,
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = jdatetime_gesel, JOIN = scalargejoinsel
 );
 
 ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
@@ -1021,22 +1036,22 @@ CREATE OPERATOR <> (
 CREATE OPERATOR < (
     LEFTARG = jtimestamp, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamp_lt_jtimestamptz,
     COMMUTATOR = >, NEGATOR = >=,
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = jdatetime_ltsel, JOIN = scalarltjoinsel
 );
 CREATE OPERATOR <= (
     LEFTARG = jtimestamp, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamp_le_jtimestamptz,
     COMMUTATOR = >=, NEGATOR = >,
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = jdatetime_lesel, JOIN = scalarlejoinsel
 );
 CREATE OPERATOR > (
     LEFTARG = jtimestamp, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamp_gt_jtimestamptz,
     COMMUTATOR = <, NEGATOR = <=,
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = jdatetime_gtsel, JOIN = scalargtjoinsel
 );
 CREATE OPERATOR >= (
     LEFTARG = jtimestamp, RIGHTARG = jtimestamptz, PROCEDURE = jtimestamp_ge_jtimestamptz,
     COMMUTATOR = <=, NEGATOR = <,
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = jdatetime_gesel, JOIN = scalargejoinsel
 );
 
 ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD
@@ -1077,22 +1092,22 @@ CREATE OPERATOR <> (
 CREATE OPERATOR < (
     LEFTARG = jtimestamptz, RIGHTARG = jtimestamp, PROCEDURE = jtimestamptz_lt_jtimestamp,
     COMMUTATOR = >, NEGATOR = >=,
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    RESTRICT = jdatetime_ltsel, JOIN = scalarltjoinsel
 );
 CREATE OPERATOR <= (
     LEFTARG = jtimestamptz, RIGHTARG = jtimestamp, PROCEDURE = jtimestamptz_le_jtimestamp,
     COMMUTATOR = >=, NEGATOR = >,
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    RESTRICT = jdatetime_lesel, JOIN = scalarlejoinsel
 );
 CREATE OPERATOR > (
     LEFTARG = jtimestamptz, RIGHTARG = jtimestamp, PROCEDURE = jtimestamptz_gt_jtimestamp,
     COMMUTATOR = <, NEGATOR = <=,
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    RESTRICT = jdatetime_gtsel, JOIN = scalargtjoinsel
 );
 CREATE OPERATOR >= (
     LEFTARG = jtimestamptz, RIGHTARG = jtimestamp, PROCEDURE = jtimestamptz_ge_jtimestamp,
     COMMUTATOR = <=, NEGATOR = <,
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    RESTRICT = jdatetime_gesel, JOIN = scalargejoinsel
 );
 
 ALTER OPERATOR FAMILY jdatetime_ops USING btree ADD

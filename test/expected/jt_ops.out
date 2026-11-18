@@ -39,14 +39,14 @@ WHERE o.oprleft = o.oprright
   AND o.oprleft IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype)
 GROUP BY 1, 2, 3, 4, 5, 6, 7
 ORDER BY o.oprname COLLATE "C";
- operator |  restrict   | join_estimator  | hashes | merges | commutator | negator | types 
-----------+-------------+-----------------+--------+--------+------------+---------+-------
- <        | scalarltsel | scalarltjoinsel | f      | f      | >          | >=      |     3
- <=       | scalarlesel | scalarlejoinsel | f      | f      | >=         | >       |     3
- <>       | neqsel      | neqjoinsel      | f      | f      | <>         | =       |     3
- =        | eqsel       | eqjoinsel       | t      | t      | =          | <>      |     3
- >        | scalargtsel | scalargtjoinsel | f      | f      | <          | <=      |     3
- >=       | scalargesel | scalargejoinsel | f      | f      | <=         | <       |     3
+ operator |    restrict     | join_estimator  | hashes | merges | commutator | negator | types 
+----------+-----------------+-----------------+--------+--------+------------+---------+-------
+ <        | jdatetime_ltsel | scalarltjoinsel | f      | f      | >          | >=      |     3
+ <=       | jdatetime_lesel | scalarlejoinsel | f      | f      | >=         | >       |     3
+ <>       | neqsel          | neqjoinsel      | f      | f      | <>         | =       |     3
+ =        | eqsel           | eqjoinsel       | t      | t      | =          | <>      |     3
+ >        | jdatetime_gtsel | scalargtjoinsel | f      | f      | <          | <=      |     3
+ >=       | jdatetime_gesel | scalargejoinsel | f      | f      | <=         | <       |     3
 (6 rows)
 
 -- every operator is its commutator's and negator's partner, within its own type

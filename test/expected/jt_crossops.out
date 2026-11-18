@@ -45,14 +45,14 @@ WHERE o.oprleft <> o.oprright
   AND o.oprright IN ('jdate'::regtype, 'jtimestamp'::regtype, 'jtimestamptz'::regtype)
 GROUP BY 1, 2, 3, 4, 5, 6, 7
 ORDER BY o.oprname COLLATE "C";
- operator |  restrict   | join_estimator  | hashes | merges | commutator | negator | pairs 
-----------+-------------+-----------------+--------+--------+------------+---------+-------
- <        | scalarltsel | scalarltjoinsel | f      | f      | >          | >=      |     6
- <=       | scalarlesel | scalarlejoinsel | f      | f      | >=         | >       |     6
- <>       | neqsel      | neqjoinsel      | f      | f      | <>         | =       |     6
- =        | eqsel       | eqjoinsel       | f      | t      | =          | <>      |     6
- >        | scalargtsel | scalargtjoinsel | f      | f      | <          | <=      |     6
- >=       | scalargesel | scalargejoinsel | f      | f      | <=         | <       |     6
+ operator |    restrict     | join_estimator  | hashes | merges | commutator | negator | pairs 
+----------+-----------------+-----------------+--------+--------+------------+---------+-------
+ <        | jdatetime_ltsel | scalarltjoinsel | f      | f      | >          | >=      |     6
+ <=       | jdatetime_lesel | scalarlejoinsel | f      | f      | >=         | >       |     6
+ <>       | neqsel          | neqjoinsel      | f      | f      | <>         | =       |     6
+ =        | eqsel           | eqjoinsel       | f      | t      | =          | <>      |     6
+ >        | jdatetime_gtsel | scalargtjoinsel | f      | f      | <          | <=      |     6
+ >=       | jdatetime_gesel | scalargejoinsel | f      | f      | <=         | <       |     6
 (6 rows)
 
 -- every cross-type operator has its commutator on the reversed pair and its
