@@ -1400,3 +1400,41 @@ CREATE FUNCTION jdate_part(text, jtimestamp) RETURNS numeric
     AS 'MODULE_PATHNAME', 'jtimestamp_part' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 CREATE FUNCTION jdate_part(text, jtimestamptz) RETURNS numeric
     AS 'MODULE_PATHNAME', 'jtimestamptz_part' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+-- ============================================================
+-- jdate_trunc for jtimestamp and jtimestamptz
+-- ============================================================
+--
+-- jdate_trunc(unit, jtimestamp), jdate_trunc(unit, jtimestamptz) and
+-- jdate_trunc(unit, jtimestamptz, zone). year, quarter and month give the start
+-- of the Jalali period at local midnight, week the Saturday on or before the day
+-- (as jdate_trunc('week', jdate)), day, hour, minute, second, milliseconds and
+-- microseconds are core's truncation (hour and finer are local clock fields: in
+-- Asia/Tehran the hour of 12:45 UTC is 16:00+03:30). decade, century and
+-- millennium are 0A000 as for jdate_trunc, an unknown unit is 22023, and the
+-- errors name the real type. Infinity gives infinity for every known unit.
+--
+-- jtimestamp is IMMUTABLE. jtimestamptz works on the clock of the session zone
+-- and is STABLE; with an explicit zone it is IMMUTABLE, as core's three-argument
+-- date_trunc, and the zone is read as in core (name, abbreviation or POSIX offset
+-- with its POSIX sign: '+03:30' means UTC-3:30). A local midnight that does not
+-- exist (Asia/Tehran 2020-03-21 00:00, the clocks went from 00:00 to 01:00) gives
+-- the first valid instant of that day, 01:00, as core's date_trunc('day') does.
+--
+-- Range: a jtimestamp week start at the very start of the range (-0061-01-01 is a
+-- Thursday, so its week starts five days below the minimum) is 22008, as for
+-- jdate. For jtimestamptz EVERY unit is checked against the safe range, since the
+-- truncated local clock can fall below the safe lower bound (the day start of the
+-- first safe instant in a zone 15:59 east of UTC).
+--
+-- A call with a bare literal for the value, such as
+-- jdate_trunc('month', '1403-05-15'), is ambiguous (42725) now that several types
+-- offer the function: it was taken as a jdate before. Give the literal a type.
+-- The C code is in src/jtimestamp_trunc.c.
+
+CREATE FUNCTION jdate_trunc(text, jtimestamp) RETURNS jtimestamp
+    AS 'MODULE_PATHNAME', 'jdate_trunc_jtimestamp' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_trunc(text, jtimestamptz) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jdate_trunc_jtimestamptz' LANGUAGE C STABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION jdate_trunc(text, jtimestamptz, text) RETURNS jtimestamptz
+    AS 'MODULE_PATHNAME', 'jdate_trunc_jtimestamptz_zone' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;

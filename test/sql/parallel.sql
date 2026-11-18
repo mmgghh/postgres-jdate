@@ -38,13 +38,14 @@ WHERE p.proparallel <> 's' OR s.proparallel <> 's'
 ORDER BY 1;
 
 -- the checks above are not vacuous: they looked at the extension's functions
--- (at least 153: the 36 cross-type operator functions and 6 cmp functions of the
+-- (at least 156: the 36 cross-type operator functions and 6 cmp functions of the
 -- three types, the 6 interval arithmetic functions of jtimestamp, the 13 of
 -- jtimestamptz and jdate (interval and time arithmetic), the 5 jgenerate_series
 -- functions, the 8 of jdate_bin, AT TIME ZONE and OVERLAPS and the 4 extract() and
--- jdate_part functions of the two timestamp types are among them) and at
+-- jdate_part functions of the two timestamp types and the 3 jdate_trunc functions of
+-- the two timestamp types are among them) and at
 -- its six aggregates, min() and max() of jdate, jtimestamp and jtimestamptz
-SELECT count(*) FILTER (WHERE p.prokind = 'f') >= 153 AS functions_checked,
+SELECT count(*) FILTER (WHERE p.prokind = 'f') >= 156 AS functions_checked,
        count(*) FILTER (WHERE p.prokind = 'a') AS aggregates_checked
 FROM pg_proc p
 JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid
