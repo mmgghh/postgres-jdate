@@ -65,6 +65,8 @@ jobs:
         run: sudo make install PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
       - name: Concurrency stress (pgbench)
         run: PGBIN=/usr/lib/postgresql/${{ matrix.pg }}/bin dev/stress.sh
+      - name: Exhaustive jtimestamptz sweep (every day, UTC and Tehran)
+        run: PGBIN=/usr/lib/postgresql/${{ matrix.pg }}/bin dev/fullrange-sweep.sh
       - name: Stress verifier self-test (must detect the corruption)
         run: |
           # The self-test exits 3 when the verifier caught a deliberately
