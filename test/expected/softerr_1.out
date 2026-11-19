@@ -20,6 +20,42 @@ SELECT pg_input_is_valid('infinity', 'jdate') AS valid_infinity;
  t
 (1 row)
 
+SELECT pg_input_is_valid(' infinity', 'jdate') AS lead_space_infinity;
+ lead_space_infinity 
+---------------------
+ t
+(1 row)
+
+SELECT pg_input_is_valid('infinity ', 'jdate') AS trail_space_infinity;
+ trail_space_infinity 
+----------------------
+ t
+(1 row)
+
+SELECT pg_input_is_valid(' -infinity ', 'jdate') AS padded_minus_infinity;
+ padded_minus_infinity 
+-----------------------
+ t
+(1 row)
+
+SELECT pg_input_is_valid(E'\t-infinity\n', 'jdate') AS tab_newline_infinity;
+ tab_newline_infinity 
+----------------------
+ t
+(1 row)
+
+SELECT pg_input_is_valid('- infinity', 'jdate') AS space_inside_infinity;
+ space_inside_infinity 
+-----------------------
+ f
+(1 row)
+
+SELECT pg_input_is_valid(' infinity 1403-01-01', 'jdate') AS infinity_then_date;
+ infinity_then_date 
+--------------------
+ f
+(1 row)
+
 SELECT pg_input_is_valid('garbage', 'jdate') AS syntax_error;
  syntax_error 
 --------------

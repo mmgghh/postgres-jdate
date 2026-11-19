@@ -11,6 +11,16 @@ SELECT '3177-12-29'::jdate;   -- JALAALI_MAX_YEAR, common year, 29-day Esfand
 -- infinity
 SELECT 'infinity'::jdate, '-infinity'::jdate;
 SELECT 'INFINITY'::jdate, 'Infinity'::jdate;
+-- whitespace around the infinity words is accepted (like jtimestamp)
+SELECT ' infinity'::jdate, 'infinity '::jdate, ' -infinity '::jdate;
+SELECT E'\tinfinity\n'::jdate, E'\n-infinity\t'::jdate, E' \t INFINITY \n'::jdate;
+-- but only around the words: nothing else gets looser
+\set VERBOSITY sqlstate
+SELECT '- infinity'::jdate;
+SELECT 'infinity 1403-01-01'::jdate;
+SELECT 'infinit'::jdate;
+SELECT '  '::jdate;
+\set VERBOSITY default
 
 -- invalid input: format errors
 SELECT 'garbage'::jdate;

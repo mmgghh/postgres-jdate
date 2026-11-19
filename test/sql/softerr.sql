@@ -11,6 +11,12 @@ SET timezone = 'UTC';
 -- pg_input_is_valid: false for bad input, true for good input
 SELECT pg_input_is_valid('1403-05-15', 'jdate') AS valid;
 SELECT pg_input_is_valid('infinity', 'jdate') AS valid_infinity;
+SELECT pg_input_is_valid(' infinity', 'jdate') AS lead_space_infinity;
+SELECT pg_input_is_valid('infinity ', 'jdate') AS trail_space_infinity;
+SELECT pg_input_is_valid(' -infinity ', 'jdate') AS padded_minus_infinity;
+SELECT pg_input_is_valid(E'\t-infinity\n', 'jdate') AS tab_newline_infinity;
+SELECT pg_input_is_valid('- infinity', 'jdate') AS space_inside_infinity;
+SELECT pg_input_is_valid(' infinity 1403-01-01', 'jdate') AS infinity_then_date;
 SELECT pg_input_is_valid('garbage', 'jdate') AS syntax_error;
 SELECT pg_input_is_valid('1403-13-01', 'jdate') AS invalid_month;
 SELECT pg_input_is_valid('1404-12-30', 'jdate') AS non_leap_day_30;

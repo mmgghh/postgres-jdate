@@ -49,6 +49,30 @@ SELECT 'INFINITY'::jdate, 'Infinity'::jdate;
  infinity | infinity
 (1 row)
 
+-- whitespace around the infinity words is accepted (like jtimestamp)
+SELECT ' infinity'::jdate, 'infinity '::jdate, ' -infinity '::jdate;
+  jdate   |  jdate   |   jdate   
+----------+----------+-----------
+ infinity | infinity | -infinity
+(1 row)
+
+SELECT E'\tinfinity\n'::jdate, E'\n-infinity\t'::jdate, E' \t INFINITY \n'::jdate;
+  jdate   |   jdate   |  jdate   
+----------+-----------+----------
+ infinity | -infinity | infinity
+(1 row)
+
+-- but only around the words: nothing else gets looser
+\set VERBOSITY sqlstate
+SELECT '- infinity'::jdate;
+ERROR:  22007
+SELECT 'infinity 1403-01-01'::jdate;
+ERROR:  22007
+SELECT 'infinit'::jdate;
+ERROR:  22007
+SELECT '  '::jdate;
+ERROR:  22007
+\set VERBOSITY default
 -- invalid input: format errors
 SELECT 'garbage'::jdate;
 ERROR:  invalid input syntax for type jdate: "garbage"

@@ -167,10 +167,19 @@ jdate_in(PG_FUNCTION_ARGS)
 	int			jdn;
 	DateADT		result;
 
-	if (pg_strcasecmp(str, "infinity") == 0)
-		PG_RETURN_DATEADT(DATEVAL_NOEND);
-	if (pg_strcasecmp(str, "-infinity") == 0)
-		PG_RETURN_DATEADT(DATEVAL_NOBEGIN);
+	/* Whitespace around the infinity words is accepted, like jtimestamp_in. */
+	{
+		const char *start = jdate_skip_space(str);
+		const char *stop = start + strlen(start);
+
+		while (stop > start && scanner_isspace(stop[-1]))
+			stop--;
+
+		if (stop - start == 8 && pg_strncasecmp(start, "infinity", 8) == 0)
+			PG_RETURN_DATEADT(DATEVAL_NOEND);
+		if (stop - start == 9 && pg_strncasecmp(start, "-infinity", 9) == 0)
+			PG_RETURN_DATEADT(DATEVAL_NOBEGIN);
+	}
 
 	/*
 	 * Each failure below is a single ereturn at the outermost level, with no
