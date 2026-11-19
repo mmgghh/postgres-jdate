@@ -95,8 +95,9 @@ SET max_parallel_workers_per_gather = 2;
 SET enable_mergejoin = off;
 SET enable_nestloop = off;
 
--- Labels sort the same in every collation: the 'j' queries (jtimestamp) and the
--- 't' queries (jtimestamptz) come after the digit ones.
+-- Every text sort key is COLLATE "C", so the row order does not depend on the
+-- database collation: digits, then the 'j' queries (jtimestamp), then the 't'
+-- queries (jtimestamptz).
 -- Each query returns one text column v. node is a plan node that must also
 -- appear (Gather Merge for ORDER BY, Hash Join for the join). ordered means
 -- the query has a total ORDER BY, so the checksum also covers row order.
@@ -179,7 +180,7 @@ SELECT label,
        par_plan_has(query, 'Gather') AS has_gather,
        (node IS NULL OR par_plan_has(query, node)) AS has_expected_node
 FROM par_queries
-ORDER BY label;
+ORDER BY label COLLATE "C";
 
 -- min/max of each of the three types must use a two-phase aggregate: Partial
 -- Aggregate below the Gather, Finalize Aggregate above it (plain, and grouped
@@ -193,7 +194,7 @@ FROM par_queries
 WHERE label IN ('6 min_max', '6 min_max_by_col',
                 'j3 min_max', 'j3 min_max_by_col',
                 't3 min_max', 't3 min_max_by_col')
-ORDER BY label;
+ORDER BY label COLLATE "C";
 
 -- ---------------------------------------------------------------------
 -- (c) the same checksum with parallelism off and on
@@ -209,13 +210,13 @@ DECLARE
 BEGIN
     FOREACH w IN ARRAY ARRAY[0, 2] LOOP
         PERFORM set_config('max_parallel_workers_per_gather', w::text, false);
-        FOR q IN SELECT label, query, ordered FROM par_queries ORDER BY label LOOP
+        FOR q IN SELECT label, query, ordered FROM par_queries ORDER BY label COLLATE "C" LOOP
             EXECUTE format(
                 'CREATE TEMP TABLE par_tmp AS '
-                'SELECT count(*) AS cnt, min(v) AS mn, max(v) AS mx, '
+                'SELECT count(*) AS cnt, min(v COLLATE "C") AS mn, max(v COLLATE "C") AS mx, '
                 '       md5(string_agg(v, '','' %s)) AS sum '
                 'FROM (%s) s(v)',
-                CASE WHEN q.ordered THEN '' ELSE 'ORDER BY v' END,
+                CASE WHEN q.ordered THEN '' ELSE 'ORDER BY v COLLATE "C"' END,
                 q.query);
             INSERT INTO par_results
                 SELECT q.label, w, cnt, mn, mx, sum FROM par_tmp;
@@ -231,7 +232,7 @@ SELECT label,
        count(DISTINCT (cnt, mn, mx, sum)) = 1 AS equal
 FROM par_results
 GROUP BY label
-ORDER BY label;
+ORDER BY label COLLATE "C";
 
 RESET max_parallel_workers_per_gather;
 RESET enable_mergejoin;

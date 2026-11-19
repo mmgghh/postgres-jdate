@@ -40,6 +40,8 @@ PGDATA="$DEV/pgdata"
 EXTDIR="$DEV/extdir"
 HEADERS="$DEV/pg18-headers"
 PORT="${JDATE_DEV_PORT:-55439}"
+# Locale of the throwaway cluster (see cmd_setup).
+TEST_LOCALE="C.UTF-8"
 PGBIN="/usr/lib/postgresql/18/bin"
 # Pin the client tools to the PG18 install; find/PATH can pick another major.
 PSQL="$PGBIN/psql"
@@ -63,8 +65,27 @@ cmd_setup() {
 	fi
 
 	if [ ! -f "$PGDATA/PG_VERSION" ]; then
-		echo "Initializing local PostgreSQL 18 cluster in $PGDATA..."
-		"$PGBIN/initdb" -D "$PGDATA" -U "$(whoami)" --auth=trust >/dev/null
+		# C.UTF-8 so that collation-dependent row order shows up locally the
+		# way it does on CI: an en_US.UTF-8 cluster hid a jt_zone failure.
+		echo "Initializing local PostgreSQL 18 cluster in $PGDATA (locale $TEST_LOCALE)..."
+		"$PGBIN/initdb" -D "$PGDATA" -U "$(whoami)" --auth=trust \
+			--locale="$TEST_LOCALE" >/dev/null
+	else
+		# Never reuse an existing cluster silently: say which locale it has.
+		local have
+		# Single-user mode reads template1 without a running server; it
+		# refuses (and we print "unknown") while the server is up.
+		have="$(echo "SELECT datcollate FROM pg_database WHERE datname = 'template1'" |
+			"$PGBIN/postgres" --single -j -D "$PGDATA" template1 2>/dev/null |
+			sed -n 's/.*datcollate = "\([^"]*\)".*/\1/p' || true)"
+		if [ -z "$have" ] && "$PGBIN/pg_ctl" -D "$PGDATA" status >/dev/null 2>&1; then
+			have="$("$PSQL" -h "$SOCKDIR" -p "$PORT" -d postgres -Atc "SELECT datcollate FROM pg_database WHERE datname = 'template1'" 2>/dev/null || true)"
+		fi
+		echo "Using the existing cluster in $PGDATA (LC_COLLATE ${have:-unknown})."
+		if [ "$have" != "$TEST_LOCALE" ]; then
+			echo "warning: the cluster locale is not $TEST_LOCALE; collation-dependent" \
+				"row order may differ from CI. To recreate it: $0 stop; rm -rf $PGDATA; $0 setup" >&2
+		fi
 	fi
 }
 

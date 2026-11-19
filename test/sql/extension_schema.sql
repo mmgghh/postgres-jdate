@@ -30,10 +30,10 @@ WHERE d.refclassid = 'pg_extension'::regclass
   AND d.deptype = 'e'
   AND i.schema IS NOT NULL
   AND i.schema <> 'jdate_s'
-ORDER BY 1, 2, 3;
+ORDER BY i.type COLLATE "C", i.schema COLLATE "C", i.identity COLLATE "C";
 
 -- ... and the kinds of object we expect really are there
-SELECT DISTINCT i.type
+SELECT DISTINCT i.type COLLATE "C" AS type
 FROM pg_depend d,
      LATERAL pg_identify_object(d.classid, d.objid, d.objsubid) i
 WHERE d.refclassid = 'pg_extension'::regclass

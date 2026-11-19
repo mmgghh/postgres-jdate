@@ -110,6 +110,11 @@ server binaries in `/usr/lib/postgresql/18/bin`. The cluster listens on port
 `55439` (override with `JDATE_DEV_PORT`) and keeps running after `check`; use
 `stop` when you are done.
 
+The local cluster is created with `initdb --locale=C.UTF-8`, so a test whose row
+order depends on the database collation fails here the way it does on CI (an
+`en_US.UTF-8` cluster hid one); `setup` says which locale an existing cluster
+has and warns if it is not `C.UTF-8` (to recreate it: `stop`, delete `.dev/pgdata`, `setup`).
+
 Two checks are not wired into any script:
 
 ```sh
