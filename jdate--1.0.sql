@@ -310,7 +310,8 @@ CREATE FUNCTION jdate_trunc(text, jdate) RETURNS jdate
     AS 'MODULE_PATHNAME', 'jdate_trunc' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- ============================================================
--- Timestamptz formatting bridge (until a native jtimestamptz type ships)
+-- Timestamptz formatting bridge: jdate_format(timestamptz) for a core timestamptz
+-- (the native jtimestamptz type and jday_format / jmonth_format come further down)
 -- ============================================================
 
 CREATE FUNCTION jdate_format(timestamptz, with_time boolean DEFAULT true) RETURNS text
