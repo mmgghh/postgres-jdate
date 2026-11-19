@@ -1,4 +1,4 @@
-comment = 'Jalali (Persian) calendar date type'
+comment = 'Jalali (Persian) calendar types: date, timestamp, timestamptz and ranges'
 default_version = '1.0'
 # Requires PostgreSQL 16 or later (see the guard in the Makefile).
 module_pathname = '$libdir/jdate'

@@ -33,12 +33,15 @@ rule (see [The calendar algorithm](docs/SPECIFICATION.md#the-calendar-algorithm)
 
 **Contents:**
 [Install](#install) ·
+[Versioning and upgrades](#versioning-and-upgrades) ·
+[Backup and restore](#backup-and-restore) ·
 [Usage](#usage) ·
 [Timestamps](#jtimestamp-and-jtimestamptz) ·
 [Time zones](#time-zones) ·
 [jalali_utils](#coming-from-jalali_utils) ·
 [Specification](#specification) ([full text](docs/SPECIFICATION.md)) ·
 [Testing](#testing) ([full text](docs/TESTING.md)) ·
+[Changelog](CHANGELOG.md) ·
 [Credits](#credits)
 
 ## Install
@@ -90,6 +93,42 @@ extension. That is also why those syntaxes work whether or not `s` is on the
 `ALTER EXTENSION jdate SET SCHEMA ...` is refused (`extension "jdate" does not
 support SET SCHEMA`, SQLSTATE `0A000`); to use a different schema, drop and
 recreate the extension. `DROP EXTENSION` removes the nine functions again.
+
+## Versioning and upgrades
+
+Releases are tagged `vMAJOR.MINOR.PATCH` (see the [changelog](CHANGELOG.md)); the
+extension version in `jdate.control` is the `MAJOR.MINOR` part, so `v1.0.0` is
+extension version `1.0`. A patch release changes only the C library and the
+documentation, not the SQL objects, so the extension version stays the same.
+
+`1.0` is the first and only extension version: one script, `jdate--1.0.sql`, and no
+upgrade scripts. If a later release changes the SQL objects, it ships a new
+`jdate--1.0--X.Y.sql` update script and a new `default_version`, and an installed
+database moves to it with `ALTER EXTENSION jdate UPDATE`. Check what a database has with
+`SELECT extversion FROM pg_extension WHERE extname = 'jdate'`.
+
+The stored data does not depend on the extension version: `jdate`, `jtimestamp` and
+`jtimestamptz` are stored exactly as core's `date`, `timestamp` and `timestamptz`
+(see the [specification](docs/SPECIFICATION.md#type-and-storage)), so an upgrade
+does not need to rewrite stored data.
+
+## Backup and restore
+
+`pg_dump` writes `CREATE EXTENSION jdate` (with its schema, if it was not the
+default) and the data and definitions that use the types; it does not dump the
+extension's own objects. To restore:
+
+- install the extension's files (`make install`, or your package) on the target
+  server first, on PostgreSQL 16 or later, and use the same extension version or a
+  newer one;
+- restore as a superuser, because `CREATE EXTENSION jdate` needs one (the control
+  file does not mark the extension trusted).
+
+The round trip is tested for plain, plain `--inserts` and custom-format dumps, with
+the extension in the default schema and in a custom one: every value, as text and as
+its binary form, and the index, default, `CHECK`, partition and view definitions
+come back identical (`dev/dump-roundtrip.sh`, run by CI on PostgreSQL 16, 17 and 18;
+see [Testing](docs/TESTING.md)).
 
 ## Usage
 
@@ -399,7 +438,7 @@ for `jdate` (the timestamp types have the rows below):
 | Supported days | 1,183,020: Jalali `-0061-01-01` to `3177-12-29` = Gregorian `0560-03-20` to `3799-03-19`; plus `infinity` and `-infinity` |
 | Text I/O | `[-]YYYY-MM-DD`; independent of `DateStyle` and `TimeZone` |
 | Binary I/O | `date`'s wire format (big-endian `int32`); receive validates the range |
-| Comparison | `=` `<>` `<` `<=` `>` `>=`; default btree and hash operator classes; `min()`/`max()` |
+| Comparison | `=` `<>` `<` `<=` `>` `>=`; default btree (`jdate_ops`) and hash (`jdate_hash_ops`) operator classes, and the same pair for the timestamp types (`jtimestamp_ops`, `jtimestamp_hash_ops`, `jtimestamptz_ops`, `jtimestamptz_hash_ops`); `min()`/`max()` |
 | Arithmetic | `jdate + int`, `int + jdate`, `jdate - int`, `jdate - jdate` (days); `jdate`, `jtimestamp` and `jtimestamptz` with `interval` (Jalali months, clamped) and `time` |
 | Casts | all assignment-level: `date`, `timestamp`, `timestamptz` to and from `jdate`; the timestamp types have their own matrix and no implicit casts |
 | Fields | `EXTRACT(... FROM jdate)` (numeric), `jdate_part` (bigint, NULL on infinity), `jdate_trunc` (`year`, `quarter`, `month`, `week` from Saturday, `day`); `to_jdate(e)` (the UTC day), `to_jdate(e, zone)` (the day in a named zone), `jdate_format`; `dow` is Saturday-first (0 = Saturday .. 6 = Friday, `dow + 1` is 1-based), `isodow` is ISO 8601 (1 = Monday .. 7 = Sunday) |
