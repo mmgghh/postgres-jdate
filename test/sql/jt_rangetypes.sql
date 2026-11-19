@@ -70,8 +70,12 @@ WHERE pg_get_function_identity_arguments(p.oid) ~ 'j(date|ts|tstz)(multi)?range'
    OR pg_get_function_result(p.oid) ~ '^j(date|ts|tstz)(multi)?range'
    OR p.proname ~ '^j(date|ts|tstz)(multi)?range';
 
--- the six types and the subtype support functions belong to the extension
-SELECT count(*) FILTER (WHERE i.type = 'type') AS member_types,
+-- the three range types and the subtype support functions belong to the
+-- extension (the types are counted by the range types' own names only: which
+-- array and multirange types pg_depend records as members is a PostgreSQL
+-- version detail, 6 on 16 and 12 on 17 and later)
+SELECT count(*) FILTER (WHERE i.type = 'type'
+                          AND i.identity ~ '(^|\.)j(date|ts|tstz)range$') AS member_types,
        count(*) FILTER (WHERE i.type = 'function') AS member_functions
 FROM pg_depend d,
      LATERAL pg_identify_object(d.classid, d.objid, d.objsubid) i
